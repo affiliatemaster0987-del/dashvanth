@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: krt-ai-terminal
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    # Without this the container filesystem is wiped on every restart and
+    # every free-tier spin-down, taking all call history with it.
+    disk:
+      name: krt-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: ANGEL_API_KEY
+        sync: false
+      - key: ANGEL_CLIENT_CODE
+        sync: false
+      - key: ANGEL_PIN
+        sync: false
+      - key: ANGEL_TOTP_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: DAILY_LOSS_LIMIT
+        value: "5000"
+      - key: MAX_CONSECUTIVE_SL
+        value: "2"

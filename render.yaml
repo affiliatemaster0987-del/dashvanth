@@ -1,3 +1,8 @@
+databases:
+  - name: krt-db
+    plan: free
+    region: singapore
+
 services:
   - type: web
     name: krt-ai-terminal
@@ -7,15 +12,13 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/health
-    # Without this the container filesystem is wiped on every restart and
-    # every free-tier spin-down, taking all call history with it.
-    disk:
-      name: krt-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: krt-db
+          property: connectionString
       - key: ANGEL_API_KEY
         sync: false
       - key: ANGEL_CLIENT_CODE
@@ -32,3 +35,7 @@ services:
         value: "5000"
       - key: MAX_CONSECUTIVE_SL
         value: "2"
+      - key: COOLDOWN_MINUTES
+        value: "30"
+      - key: UNIVERSE
+        value: "BEL,HINDALCO,VBL,SBIN,TATASTEEL,RELIANCE,INFY,SUNPHARMA,TATAMOTORS,PFC,JSWSTEEL,HDFCBANK"

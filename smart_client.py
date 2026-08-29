@@ -157,6 +157,27 @@ class SmartClient:
         return out
 
     @staticmethod
+    def depth_sizes(row) -> tuple:
+        """
+        Total resting quantity on each side of the five-level book.
+
+        This is standing size, not traded aggression - it cannot tell a market
+        buy from a market sell. The accumulation radar reports it under its own
+        name for exactly that reason.
+        """
+        depth = (row or {}).get("depth") or {}
+        def total(side):
+            rows = depth.get(side) or []
+            n = 0
+            for r in rows:
+                try:
+                    n += int(r.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    continue
+            return n or None
+        return total("buy"), total("sell")
+
+    @staticmethod
     def spread_from_depth(row) -> float | None:
         """Best bid vs best ask from the FULL-mode depth block."""
         depth = (row or {}).get("depth") or {}
@@ -290,13 +311,16 @@ class SmartClient:
             if prem <= 0:
                 continue
             spread = self.spread_from_depth(row)
+            bid_qty, ask_qty = self.depth_sizes(row)
             out.append({
                 **c,
                 "prem": prem,
                 "spread": spread if spread is not None else round(prem * 0.02, 2),
+                "spread_real": spread is not None,
                 "vol": int(row.get("tradeVolume") or 0),
                 "oi": int(row.get("opnInterest") or 0),
                 "iv": row.get("impliedVolatility"),
+                "bid_qty": bid_qty, "ask_qty": ask_qty,
             })
         return sorted(out, key=lambda c: c["strike"])
 

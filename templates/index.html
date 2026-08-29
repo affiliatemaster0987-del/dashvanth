@@ -10,32 +10,73 @@
                font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
                -webkit-font-smoothing: antialiased; min-height: 100%; }
   #root { min-height: 100vh; }
-  #boot { padding: 40px 20px; text-align: center;
-          font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; }
-  #boot .b { color: #FFA033; letter-spacing: .26em; font-size: 10px; }
-  #boot .m { color: #8A93A6; margin-top: 10px; line-height: 1.7; }
-  #boot code { color: #FFA033; }
+  .krt-boot { padding: 28px 20px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; }
+  .krt-boot .b { color: #FFA033; letter-spacing: .26em; font-size: 10px; }
+  .krt-boot .h { font-size: 16px; font-weight: 700; margin: 8px 0 12px; }
+  .krt-boot .m { color: #8A93A6; line-height: 1.7; }
+  .krt-boot .e { color: #FF4D5E; background: rgba(255,77,94,.07);
+                 border: 1px solid rgba(255,77,94,.33); border-radius: 3px;
+                 padding: 12px; margin-top: 10px; line-height: 1.6;
+                 white-space: pre-wrap; word-break: break-word; font-size: 11px; }
 </style>
 </head>
 <body>
 
 <div id="root">
-  <div id="boot">
+  <div class="krt-boot" id="krt-boot">
     <div class="b">KRT AI</div>
-    <div class="m">
-      Loading the terminal&hellip;<br>
-      If this message stays, <code>/static/terminal.js</code> did not load.<br>
-      Open that path directly &mdash; a 404 means the file is missing from the repo.
-    </div>
+    <div class="m">Loading the terminal&hellip;</div>
   </div>
 </div>
 
 <noscript>
-  <div style="padding:40px 20px;text-align:center;font-family:monospace;color:#8A93A6">
+  <div style="padding:28px 20px;font-family:monospace;color:#8A93A6">
     This terminal needs JavaScript.
   </div>
 </noscript>
 
+<script>
+/* The screen must never go silently black. Anything that stops the bundle
+   from running is printed here, because a blank page tells a trader nothing. */
+(function () {
+  function show(title, detail) {
+    var r = document.getElementById("root");
+    if (!r || window.__KRT_MOUNTED) return;
+    r.innerHTML = "";
+    var w = document.createElement("div"); w.className = "krt-boot";
+    var b = document.createElement("div"); b.className = "b"; b.textContent = "KRT AI";
+    var h = document.createElement("div"); h.className = "h"; h.textContent = title;
+    var e = document.createElement("div"); e.className = "e"; e.textContent = detail;
+    w.appendChild(b); w.appendChild(h); w.appendChild(e); r.appendChild(w);
+  }
+  window.addEventListener("error", function (ev) {
+    if (ev && ev.target && ev.target.tagName === "SCRIPT") {
+      show("The terminal script did not load.",
+           "Failed to fetch: " + (ev.target.src || "/static/terminal.js") +
+           "\n\nOpen that path directly in the browser. A 404 means the file is missing " +
+           "from the deploy — check that static/terminal.js was committed and is not " +
+           "matched by a .gitignore rule.");
+      return;
+    }
+    show("The terminal hit a script error.",
+         (ev && ev.message ? ev.message : "unknown error") +
+         (ev && ev.filename ? "\n\nat " + ev.filename + ":" + ev.lineno + ":" + ev.colno : ""));
+  }, true);
+  window.addEventListener("unhandledrejection", function (ev) {
+    show("The terminal hit an unhandled promise rejection.",
+         String((ev && ev.reason && (ev.reason.stack || ev.reason.message)) || ev.reason));
+  });
+  setTimeout(function () {
+    if (window.__KRT_MOUNTED) return;
+    show("The terminal did not start.",
+         "/static/terminal.js was requested but nothing mounted within 8 seconds.\n\n" +
+         "Open /static/terminal.js directly:\n" +
+         "  \u2022 404 \u2014 the file is not in the deploy.\n" +
+         "  \u2022 HTML instead of JavaScript \u2014 the route is falling through to index.html.\n" +
+         "  \u2022 JavaScript \u2014 the file loaded but stopped early; the error above names why.");
+  }, 8000);
+})();
+</script>
 <script src="/static/terminal.js"></script>
 </body>
 </html>

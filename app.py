@@ -289,6 +289,8 @@ def snapshot():
             "times": r.get("times", {}),
             "levels": {k: r["st"][k] for k in
                        ("pdh", "pdl", "pwh", "pwl", "pmh", "pml")},
+            "prev_date": r["st"].get("prev_date"),
+            "no_today_candle": bool(r["st"].get("no_today_candle")),
         }
 
     return {

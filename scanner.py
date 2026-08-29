@@ -50,44 +50,64 @@ def _candle_date(c):
         return None
 
 
-def _split_daily(daily):
+def session_date(daily, intra=None):
     """
-    Separate today's candle from the history BY DATE, never by position.
+    Which trading day the screen is actually showing.
 
-    The old code took daily[-2] as "yesterday". That is only true while the
-    broker has already published today's daily candle. Before it does - early
-    in the session, on a holiday, or whenever that one row is simply missing -
-    daily[-1] IS yesterday, so daily[-2] is the day before, and every previous
-    close and PDH/PDL silently shifts back a day. A stale close is what turns
-    a flat stock into a double-digit gainer and puts it top of the board.
+    Not the wall clock. Two different failures hide behind that assumption:
+
+      * Mid-session, the broker may not have published today's DAILY candle
+        yet. Taking daily[-2] as "yesterday" then reads one day too far back,
+        and a flat stock is reported as a large gainer.
+      * On a weekend or holiday there is no today at all. Treating the last
+        session as "previous" collapses every change to 0.00%.
+
+    So: if intraday candles carry today's date, the session IS today. Failing
+    that, the session is whatever the newest daily candle is dated - the last
+    completed one - and the comparison is made against the day before it.
     """
     today = now_ist().date()
-    todays, earlier = None, []
+    if intra:
+        last = _candle_date(intra[-1])
+        if last == today:
+            return today, True
+    dates = [d for d in (_candle_date(c) for c in daily) if d is not None]
+    dates = [d for d in dates if d <= today]
+    return (dates[-1] if dates else today), False
+
+
+def _split_daily(daily, session=None):
+    """Split the daily series into the session's own candle and the history."""
+    if session is None:
+        session, _ = session_date(daily)
+    current, earlier = None, []
     for c in daily:
         d = _candle_date(c)
         if d is None:
             continue
-        if d >= today:
-            todays = c
-        else:
+        if d == session:
+            current = c
+        elif d < session:
             earlier.append(c)
-    return todays, earlier
+    return current, earlier
 
 
-def _period_levels(daily):
+def _period_levels(daily, intra=None):
     """Previous day / week / month extremes from daily candles."""
     if len(daily) < 2:
         return None
 
-    today, earlier = _split_daily(daily)
+    session, is_today = session_date(daily, intra)
+    today, earlier = _split_daily(daily, session)
     if not earlier:
         # Every stamp was unreadable or in the future - fall back to position
         # rather than return nothing, but say so.
         earlier = daily[:-1]
         today = today or daily[-1]
-        shifted = True
+        missing = True
     else:
-        shifted = today is None
+        # only a real problem when the session IS today and its row is absent
+        missing = is_today and today is None
 
     prev = earlier[-1]
 
@@ -109,7 +129,9 @@ def _period_levels(daily):
         "pmh": max(c["h"] for c in mo), "pml": min(c["l"] for c in mo),
         "today_open": (today or prev)["o"],
         "prev_date": str(_candle_date(prev)),
-        "no_today_candle": shifted,
+        "session_date": str(session),
+        "session_is_today": bool(is_today),
+        "no_today_candle": missing,
     }
 
 
@@ -169,11 +191,14 @@ def stock_snapshot(sym: str) -> dict | None:
         return None
     _daily_cache[sym] = daily
 
-    lv = _period_levels(daily)
+    # the intraday series decides WHICH session this is, so it is fetched
+    # before the levels rather than after them
+    intra = client.candles(token, "FIVE_MINUTE", days=1)
+
+    lv = _period_levels(daily, intra)
     if not lv:
         return None
 
-    intra = client.candles(token, "FIVE_MINUTE", days=1)
     vwap, vol_today = _vwap_and_volume(intra)
     ltp = intra[-1]["c"] if intra else daily[-1]["c"]
     if vwap is None:
@@ -255,10 +280,10 @@ def index_snapshot():
             continue
         vwap, _ = _vwap_and_volume(intra)
         ltp = intra[-1]["c"]
-        lv = _period_levels(daily) or {}
+        lv = _period_levels(daily, intra) or {}
         prev = lv.get("prev")
         if not prev:
-            _t, _earlier = _split_daily(daily)
+            _t, _earlier = _split_daily(daily, session_date(daily, intra)[0])
             prev = _earlier[-1]["c"] if _earlier else daily[-2]["c"]
         closes = [c["c"] for c in daily]
         e20, e50, e200 = engine.ema(closes, 20), engine.ema(closes, 50), engine.ema(closes, 200)
@@ -269,6 +294,8 @@ def index_snapshot():
             "chg": round((ltp - prev) / prev * 100, 2) if prev else 0,
             "dh": max(c["h"] for c in intra), "dl": min(c["l"] for c in intra),
             "prev_date": lv.get("prev_date"),
+            "session_date": lv.get("session_date"),
+            "session_is_today": bool(lv.get("session_is_today")),
             "no_today_candle": bool(lv.get("no_today_candle")),
             "pdh": round(lv.get("pdh", 0), 2), "pdl": round(lv.get("pdl", 0), 2),
             "pwh": round(lv.get("pwh", 0), 2), "pwl": round(lv.get("pwl", 0), 2),

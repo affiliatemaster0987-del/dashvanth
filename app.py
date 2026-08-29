@@ -290,7 +290,15 @@ def snapshot():
             "levels": {k: r["st"][k] for k in
                        ("pdh", "pdl", "pwh", "pwl", "pmh", "pml")},
             "prev_date": r["st"].get("prev_date"),
+            "session_date": r["st"].get("session_date"),
+            "session_is_today": bool(r["st"].get("session_is_today")),
             "no_today_candle": bool(r["st"].get("no_today_candle")),
+            "quoted": bool(r["st"].get("quoted")),
+            "price_source": r["st"].get("price_source"),
+            "prev_source": r["st"].get("prev_source"),
+            "day_open": r["st"].get("day_open"),
+            "day_high": r["st"].get("day_high"),
+            "day_low": r["st"].get("day_low"),
         }
 
     return {
@@ -302,6 +310,8 @@ def snapshot():
                           key=lambda s: s["chg"], reverse=True),
         "bias_label": snap["bias_label"], "fear": snap["fear"],
         "commander": snap["commander"], "risk": snap["risk"],
+        "accumulation": snap.get("accumulation"),
+        "golden": snap.get("golden"),
         "top_ce": slim(snap["top_ce"]), "top_pe": slim(snap["top_pe"]),
         "jackpot_ce": [slim(r) for r in snap["jackpot_ce"]],
         "jackpot_pe": [slim(r) for r in snap["jackpot_pe"]],

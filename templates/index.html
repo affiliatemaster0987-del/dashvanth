@@ -18,13 +18,16 @@
                  border: 1px solid rgba(255,77,94,.33); border-radius: 3px;
                  padding: 12px; margin-top: 10px; line-height: 1.6;
                  white-space: pre-wrap; word-break: break-word; font-size: 11px; }
+  #krt-boot .d { color: #8A93A6; background: #12161F; border: 1px solid #232A38;
+                 border-radius: 3px; padding: 12px; margin-top: 10px; line-height: 1.6;
+                 white-space: pre-wrap; word-break: break-word; font-size: 11px; }
 </style>
 </head>
 <body>
 
 <!-- Boot and error messages live HERE, outside #root.
-     React owns #root exclusively; nothing else may touch its children,
-     or React's DOM bookkeeping breaks with a removeChild error. -->
+     React owns #root exclusively; anything else writing into it breaks
+     React's DOM bookkeeping with a removeChild error. -->
 <div id="krt-boot">
   <div class="b">KRT AI</div>
   <div class="m">Loading the terminal&hellip;</div>
@@ -39,45 +42,94 @@
 </noscript>
 
 <script>
-/* The screen must never go silently black. Anything that stops the bundle
-   from running is printed in #krt-boot, never inside #root. */
 (function () {
-  function show(title, detail) {
+  var EXPECT = "v8-1787996136";
+
+  function paint(title, detail, diag) {
     var boot = document.getElementById("krt-boot");
     if (!boot) return;
     boot.style.display = "block";
     boot.textContent = "";
-    var b = document.createElement("div"); b.className = "b"; b.textContent = "KRT AI";
-    var h = document.createElement("div"); h.className = "h"; h.textContent = title;
-    var e = document.createElement("div"); e.className = "e"; e.textContent = detail;
-    boot.appendChild(b); boot.appendChild(h); boot.appendChild(e);
+    function add(cls, txt) {
+      var d = document.createElement("div"); d.className = cls; d.textContent = txt;
+      boot.appendChild(d);
+    }
+    add("b", "KRT AI"); add("h", title); add("e", detail);
+    if (diag) add("d", diag);
   }
+
   window.addEventListener("error", function (ev) {
+    if (window.__KRT_MOUNTED) return;
     if (ev && ev.target && ev.target.tagName === "SCRIPT") {
-      show("The terminal script did not load.",
-           "Failed to fetch: " + (ev.target.src || "/static/terminal.js") +
-           "\n\nOpen that path directly. A 404 means the file is missing from the deploy.");
+      paint("The terminal script did not load.",
+            "Failed to fetch: " + (ev.target.src || "/static/terminal.js"));
       return;
     }
-    show("The terminal hit a script error.",
-         (ev && ev.message ? ev.message : "unknown error") +
-         (ev && ev.filename ? "\n\nat " + ev.filename + ":" + ev.lineno + ":" + ev.colno : ""));
+    paint("The terminal hit a script error.",
+          (ev && ev.message ? ev.message : "unknown error") +
+          (ev && ev.filename ? "\n\nat " + ev.filename + ":" + ev.lineno + ":" + ev.colno : ""));
   }, true);
+
   window.addEventListener("unhandledrejection", function (ev) {
-    show("The terminal hit an unhandled promise rejection.",
-         String((ev && ev.reason && (ev.reason.stack || ev.reason.message)) || ev.reason));
+    if (window.__KRT_MOUNTED) return;
+    paint("The terminal hit an unhandled promise rejection.",
+          String((ev && ev.reason && (ev.reason.stack || ev.reason.message)) || ev.reason));
   });
+
+  /* If nothing mounts, do not ask the user to go and check the file by hand.
+     Fetch it here and say exactly what came back. */
   setTimeout(function () {
     if (window.__KRT_MOUNTED) return;
-    show("The terminal did not start.",
-         "/static/terminal.js was requested but nothing mounted within 8 seconds.\n\n" +
-         "Open /static/terminal.js directly:\n" +
-         "  \u2022 404 \u2014 the file is not in the deploy.\n" +
-         "  \u2022 HTML instead of JavaScript \u2014 the route falls through to index.html.\n" +
-         "  \u2022 JavaScript \u2014 it loaded but stopped early; the error above names why.");
+
+    var url = "/static/terminal.js?probe=" + Date.now();
+    fetch(url, { cache: "no-store" }).then(function (res) {
+      var ct = res.headers.get("content-type") || "unknown";
+      return res.text().then(function (body) {
+        var lines = [];
+        lines.push("HTTP status   : " + res.status + " " + res.statusText);
+        lines.push("Content-Type  : " + ct);
+        lines.push("Size          : " + body.length.toLocaleString() + " bytes");
+        lines.push("Expected build: " + EXPECT);
+
+        var m = body.match(/v8-\d{9,}/);
+        lines.push("Build in file : " + (m ? m[0] : "none found"));
+        lines.push("");
+
+        var verdict;
+        if (res.status === 404) {
+          verdict = "static/terminal.js is NOT in the deploy.\n\n" +
+            "It was never committed, or .gitignore is excluding it. In the repo run:\n" +
+            "    git check-ignore -v static/terminal.js\n" +
+            "If that prints a rule, the file is being skipped silently. Force it in with:\n" +
+            "    git add -f static/terminal.js && git commit -m \"add bundle\" && git push";
+        } else if (/^\s*<!doctype|^\s*<html/i.test(body)) {
+          verdict = "The server returned HTML, not JavaScript.\n\n" +
+            "The /static route is not serving files — the request fell through to index.html. " +
+            "Check that the static/ directory exists in the deploy and app.py still mounts it.";
+        } else if (!m) {
+          verdict = "A JavaScript file is being served, but it carries no build stamp.\n\n" +
+            "That means it is an OLD terminal.js from a previous upload. Replace " +
+            "static/terminal.js with the file from the latest zip, commit, and push.";
+        } else if (m[0] !== EXPECT) {
+          verdict = "STALE BUNDLE.\n\n" +
+            "index.html is from build " + EXPECT + " but terminal.js is build " + m[0] + ".\n" +
+            "The two files must ship together. Upload BOTH from the same zip, then hard-refresh " +
+            "(Ctrl+Shift+R) so the browser drops its cached copy.";
+        } else {
+          verdict = "The correct file is being served and it parses, but no mount happened.\n\n" +
+            "That points to an error thrown while the bundle ran. Open DevTools (F12) and read " +
+            "the first red line in the Console.";
+        }
+        paint("The terminal did not start.", verdict, lines.join("\n"));
+      });
+    }).catch(function (e) {
+      paint("The terminal did not start.",
+            "/static/terminal.js could not even be fetched: " + String(e && e.message || e),
+            "The server may be asleep or still deploying. Wait a moment and reload.");
+    });
   }, 8000);
 })();
 </script>
-<script src="/static/terminal.js"></script>
+<script src="/static/terminal.js?b=v8-1787996136"></script>
 </body>
 </html>

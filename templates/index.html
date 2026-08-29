@@ -43,7 +43,7 @@
 
 <script>
 (function () {
-  var EXPECT = "v8-1787996136";
+  var EXPECT = "v12-1787997296";
 
   function paint(title, detail, diag) {
     var boot = document.getElementById("krt-boot");
@@ -91,7 +91,7 @@
         lines.push("Size          : " + body.length.toLocaleString() + " bytes");
         lines.push("Expected build: " + EXPECT);
 
-        var m = body.match(/v8-\d{9,}/);
+        var m = body.match(/v[0-9]+-[0-9]{9,}/);
         lines.push("Build in file : " + (m ? m[0] : "none found"));
         lines.push("");
 
@@ -130,6 +130,6 @@
   }, 8000);
 })();
 </script>
-<script src="/static/terminal.js?b=v8-1787996136"></script>
+<script src="/static/terminal.js?b=v12-1787997296"></script>
 </body>
 </html>

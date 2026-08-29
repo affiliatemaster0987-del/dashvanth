@@ -42,31 +42,74 @@ def candle_state(intra) -> str:
 
 
 # ---------------------------------------------------------------- level math
+def _candle_date(c):
+    """The trading date on a candle, or None when the stamp is unreadable."""
+    try:
+        return datetime.fromisoformat(str(c["t"])[:19]).date()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _split_daily(daily):
+    """
+    Separate today's candle from the history BY DATE, never by position.
+
+    The old code took daily[-2] as "yesterday". That is only true while the
+    broker has already published today's daily candle. Before it does - early
+    in the session, on a holiday, or whenever that one row is simply missing -
+    daily[-1] IS yesterday, so daily[-2] is the day before, and every previous
+    close and PDH/PDL silently shifts back a day. A stale close is what turns
+    a flat stock into a double-digit gainer and puts it top of the board.
+    """
+    today = now_ist().date()
+    todays, earlier = None, []
+    for c in daily:
+        d = _candle_date(c)
+        if d is None:
+            continue
+        if d >= today:
+            todays = c
+        else:
+            earlier.append(c)
+    return todays, earlier
+
+
 def _period_levels(daily):
     """Previous day / week / month extremes from daily candles."""
     if len(daily) < 2:
         return None
-    prev = daily[-2]
-    today = daily[-1]
+
+    today, earlier = _split_daily(daily)
+    if not earlier:
+        # Every stamp was unreadable or in the future - fall back to position
+        # rather than return nothing, but say so.
+        earlier = daily[:-1]
+        today = today or daily[-1]
+        shifted = True
+    else:
+        shifted = today is None
+
+    prev = earlier[-1]
 
     def window(days):
         cut = datetime.utcnow() - timedelta(days=days)
         rows = []
-        for c in daily[:-1]:
-            try:
-                ts = datetime.fromisoformat(str(c["t"])[:19])
-            except ValueError:
+        for c in earlier:
+            ts_d = _candle_date(c)
+            if ts_d is None:
                 continue
-            if ts >= cut:
+            if datetime.combine(ts_d, datetime.min.time()) >= cut:
                 rows.append(c)
-        return rows or daily[:-1]
+        return rows or earlier
 
     wk, mo = window(7), window(30)
     return {
         "pdh": prev["h"], "pdl": prev["l"], "prev": prev["c"],
         "pwh": max(c["h"] for c in wk), "pwl": min(c["l"] for c in wk),
         "pmh": max(c["h"] for c in mo), "pml": min(c["l"] for c in mo),
-        "today_open": today["o"],
+        "today_open": (today or prev)["o"],
+        "prev_date": str(_candle_date(prev)),
+        "no_today_candle": shifted,
     }
 
 
@@ -179,7 +222,9 @@ def stock_snapshot(sym: str) -> dict | None:
         "sector": config.SECTOR_MAP.get(sym, "OTHER"),
         "ltp": round(ltp, 2), "vwap": vwap, "atr": _atr(daily),
         "vol_ratio": vol_ratio,
-        **{k: round(v, 2) for k, v in lv.items()},
+        **{k: (round(v, 2) if isinstance(v, (int, float))
+                and not isinstance(v, bool) else v)
+           for k, v in lv.items()},
         "closed_beyond_up": up_close, "follow_up": up_follow,
         "closed_beyond_dn": dn_close, "follow_dn": dn_follow,
         "ema20": e20, "ema50": e50, "ema200": e200, "stack": stack,
@@ -211,7 +256,10 @@ def index_snapshot():
         vwap, _ = _vwap_and_volume(intra)
         ltp = intra[-1]["c"]
         lv = _period_levels(daily) or {}
-        prev = lv.get("prev") or daily[-2]["c"]
+        prev = lv.get("prev")
+        if not prev:
+            _t, _earlier = _split_daily(daily)
+            prev = _earlier[-1]["c"] if _earlier else daily[-2]["c"]
         closes = [c["c"] for c in daily]
         e20, e50, e200 = engine.ema(closes, 20), engine.ema(closes, 50), engine.ema(closes, 200)
         recent = intra[-3:] if len(intra) >= 4 else []
@@ -220,6 +268,8 @@ def index_snapshot():
             "vwap": vwap or prev,
             "chg": round((ltp - prev) / prev * 100, 2) if prev else 0,
             "dh": max(c["h"] for c in intra), "dl": min(c["l"] for c in intra),
+            "prev_date": lv.get("prev_date"),
+            "no_today_candle": bool(lv.get("no_today_candle")),
             "pdh": round(lv.get("pdh", 0), 2), "pdl": round(lv.get("pdl", 0), 2),
             "pwh": round(lv.get("pwh", 0), 2), "pwl": round(lv.get("pwl", 0), 2),
             "ema20": e20, "ema50": e50, "ema200": e200,

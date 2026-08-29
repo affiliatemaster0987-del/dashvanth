@@ -7,6 +7,8 @@ derived here so engine.py can stay a pure function of a dict.
 import logging
 from datetime import datetime, timedelta, date
 
+import accumulation
+import quant
 import config
 import engine
 import news as news_mod
@@ -174,8 +176,54 @@ def _confirmation(intra, level, up):
     return True, bool(follow)
 
 
+# ------------------------------------------------------------- broker quotes
+def _num(v):
+    """Angel returns numbers as strings often enough to matter."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def fetch_quotes(symbols) -> dict:
+    """
+    One batched FULL-mode quote call for the whole universe.
+
+    Candles are a derived, lagging view: on a closed session the intraday
+    series is empty, so the code fell back to the newest DAILY close - which
+    may be days old if that row has not been written yet. The quote endpoint
+    is the broker's own book and carries ltp, open, high, low and the real
+    previous close. It is authoritative and costs one request per 50 symbols,
+    so there is no reason to infer any of it.
+    """
+    tokens, by_token = [], {}
+    for sym in symbols:
+        t = client.token_for(sym)
+        if t:
+            tokens.append(str(t))
+            by_token[str(t)] = sym
+    if not tokens:
+        return {}
+    rows = client.quote_full({"NSE": tokens})
+    out = {}
+    for tok, row in (rows or {}).items():
+        sym = by_token.get(str(tok))
+        if not sym:
+            continue
+        out[sym] = {
+            "ltp": _num(row.get("ltp")),
+            "open": _num(row.get("open")),
+            "high": _num(row.get("high")),
+            "low": _num(row.get("low")),
+            "prev_close": _num(row.get("close")),
+            "volume": _num(row.get("tradeVolume")) or _num(row.get("volume")),
+        }
+    return out
+
+
 # ------------------------------------------------------------------ snapshot
-def stock_snapshot(sym: str) -> dict | None:
+def stock_snapshot(sym: str, quote: dict | None = None) -> dict | None:
     global _cache_day
     today = date.today()
     if _cache_day != today:
@@ -186,7 +234,7 @@ def stock_snapshot(sym: str) -> dict | None:
     if not token:
         return None
 
-    daily = _daily_cache.get(sym) or client.candles(token, "ONE_DAY", days=45)
+    daily = _daily_cache.get(sym) or client.candles(token, "ONE_DAY", days=400)
     if len(daily) < 3:
         return None
     _daily_cache[sym] = daily
@@ -200,7 +248,24 @@ def stock_snapshot(sym: str) -> dict | None:
         return None
 
     vwap, vol_today = _vwap_and_volume(intra)
-    ltp = intra[-1]["c"] if intra else daily[-1]["c"]
+
+    # The broker's own quote wins over anything inferred from candles.
+    q = quote or {}
+    ltp = q.get("ltp") or (intra[-1]["c"] if intra else daily[-1]["c"])
+    quoted = bool(q.get("ltp"))
+
+    # A quoted previous close settles the day's change outright - no guessing
+    # which daily row counts as "yesterday".
+    if q.get("prev_close"):
+        lv = dict(lv)
+        lv["prev"] = q["prev_close"]
+        lv["prev_source"] = "quote"
+    else:
+        lv = dict(lv)
+        lv["prev_source"] = "candles"
+
+    if q.get("volume"):
+        vol_today = q["volume"]
     if vwap is None:
         vwap = lv["prev"]
 
@@ -257,6 +322,10 @@ def stock_snapshot(sym: str) -> dict | None:
         "orl": round(orl, 2) if orl else None,
         "window_pct": round(win_pct, 2) if fresh else 0.0,
         "fresh": fresh, "candle_state": cstate,
+        "_intra": intra, "_daily": daily,
+        "day_open": q.get("open"), "day_high": q.get("high"), "day_low": q.get("low"),
+        "quoted": quoted,
+        "price_source": "broker quote" if quoted else "daily candle",
     }
 
 
@@ -272,15 +341,35 @@ def _sided(st, side):
 def index_snapshot():
     """Indices get the same level treatment as stocks - they are tradable too."""
     out = []
+    buckets = {}
+    for _i in config.INDICES:
+        buckets.setdefault(_i.get("exchange", "NSE"), []).append(str(_i["token"]))
+    try:
+        idx_quotes = client.quote_full(buckets)
+    except Exception:                                  # noqa: BLE001
+        idx_quotes = {}
+
     for idx in config.INDICES:
         exch = idx.get("exchange", "NSE")
         intra = client.candles(idx["token"], "FIVE_MINUTE", days=1, exchange=exch)
-        daily = client.candles(idx["token"], "ONE_DAY", days=45, exchange=exch)
-        if not intra or len(daily) < 3:
+        daily = client.candles(idx["token"], "ONE_DAY", days=400, exchange=exch)
+        # An empty intraday series is normal outside a session. As long as the
+        # quote or the daily history is there, the index still has a price.
+        if len(daily) < 3:
             continue
         vwap, _ = _vwap_and_volume(intra)
-        ltp = intra[-1]["c"]
+        ltp = intra[-1]["c"] if intra else daily[-1]["c"]
         lv = _period_levels(daily, intra) or {}
+
+        # same rule as the stocks: the broker's quote outranks the candles
+        iq = (idx_quotes or {}).get(str(idx["token"])) or {}
+        q_ltp, q_prev = _num(iq.get("ltp")), _num(iq.get("close"))
+        q_high, q_low = _num(iq.get("high")), _num(iq.get("low"))
+        if q_ltp:
+            ltp = q_ltp
+        if q_prev:
+            lv = dict(lv)
+            lv["prev"] = q_prev
         prev = lv.get("prev")
         if not prev:
             _t, _earlier = _split_daily(daily, session_date(daily, intra)[0])
@@ -292,7 +381,9 @@ def index_snapshot():
             "sym": idx["sym"], "ltp": round(ltp, 2), "prev": round(prev, 2),
             "vwap": vwap or prev,
             "chg": round((ltp - prev) / prev * 100, 2) if prev else 0,
-            "dh": max(c["h"] for c in intra), "dl": min(c["l"] for c in intra),
+            "dh": q_high or (max(c["h"] for c in intra) if intra else daily[-1]["h"]),
+            "dl": q_low or (min(c["l"] for c in intra) if intra else daily[-1]["l"]),
+            "quoted": bool(q_ltp),
             "prev_date": lv.get("prev_date"),
             "session_date": lv.get("session_date"),
             "session_is_today": bool(lv.get("session_is_today")),
@@ -600,8 +691,8 @@ def index_option_cards(setups, ctx):
         # quote a band of strikes once - it gives the recommended contract
         # AND enough OI on both sides to compute a PCR
         try:
-            ce_chain = client.option_chain(name, kind="CE", exch=exch)
-            pe_chain = client.option_chain(name, kind="PE", exch=exch)
+            ce_chain = client.option_chain(name, kind="CE", exchange=exch)
+            pe_chain = client.option_chain(name, kind="PE", exchange=exch)
         except Exception:                                  # noqa: BLE001
             ce_chain = pe_chain = []
         if not ce_chain or not pe_chain:
@@ -656,11 +747,171 @@ def index_option_cards(setups, ctx):
     return cards
 
 
+
+
+# ----------------------------------------------------- golden jackpot core
+def golden_jackpot(ranked, stocks, indices, sector_rows, acc, breadth):
+    """
+    Fold regime, multi-timeframe, historical zone memory and the option chain
+    into one ranked list, then surface only the top few.
+
+    No new broker call is made: the 5-minute and daily candles were already
+    fetched for each stock, the chain was already quoted by the accumulation
+    radar, and the regime comes from the index rows.
+    """
+    reg = quant.regime(indices, breadth)
+    by_sym = {s["sym"]: s for s in (stocks or [])}
+
+    # accumulation scores keyed by underlying, best contract per side
+    acc_by = {}
+    for ix in ((acc or {}).get("indices") or []):
+        for side in ("CE", "PE"):
+            top = ix.get("best_" + side.lower())
+            if top:
+                acc_by[(ix["sym"], side)] = top
+
+    # one local chain read per index, reused by every candidate on it
+    chain_by = {}
+    for ix in ((acc or {}).get("indices") or []):
+        mp = quant.max_pain(ix.get("CE") or [], ix.get("PE") or [])
+        if mp:
+            chain_by[ix["sym"]] = mp
+
+    out = []
+    for r in (ranked or [])[:12]:
+        st = r.get("st") or {}
+        sym, side = st.get("sym"), r.get("side")
+        raw = by_sym.get(sym) or {}
+        intra, daily = raw.get("_intra"), raw.get("_daily")
+
+        level = st.get("pdh") if side == "CE" else st.get("pdl")
+        ctx = {
+            "side": side,
+            "setup": {"checks": r.get("checks"), "vol_ratio": st.get("vol_ratio")},
+            "regime": reg,
+            "mtf": quant.multi_timeframe(intra, daily, side),
+            "zone": quant.zone_memory(daily, level) if level else None,
+            "accumulation": acc_by.get((sym, side)),
+            "chain": chain_by.get(sym),
+        }
+        g = quant.golden_score(ctx)
+        if g["score"] is None:
+            continue
+        out.append({
+            "sym": sym, "side": side, "sector": st.get("sector"),
+            "ltp": st.get("ltp"), "legs": r.get("legs"),
+            "level": level, "level_name": "PREV DAY HIGH" if side == "CE" else "PREV DAY LOW",
+            "engine_score": r.get("score"),
+            "golden": g, "mtf": ctx["mtf"], "zone": ctx["zone"],
+            "chain": ctx["chain"], "accumulation": ctx["accumulation"],
+        })
+
+    # the raw candle arrays were only needed here; they must never reach the
+    # API response or every snapshot carries thousands of unread candles
+    for st in (stocks or []):
+        st.pop("_intra", None)
+        st.pop("_daily", None)
+
+    out.sort(key=lambda x: -(x["golden"]["score"] or 0))
+    top = [x for x in out if not x["golden"]["thin"]][:4]
+    return {
+        "regime": reg, "weights": quant.WEIGHTS,
+        "unavailable": quant.UNAVAILABLE,
+        "top": top, "all": out[:12],
+        "note": (None if top else
+                 "Nothing cleared the coverage bar this scan. A thin score is "
+                 "held back rather than promoted."),
+    }
+
+
+# --------------------------------------------------- accumulation radar
+def accumulation_radar(index_setups, sector_rows, ctx):
+    """
+    Score ATM +/- 5 strikes on both sides of each index, so concentration is
+    visible across the chain rather than on one contract.
+
+    One batched quote per index per side. Contracts that do not quote are
+    skipped rather than carried at a stale premium.
+    """
+    sector_by_name = {r["name"]: r for r in (sector_rows or [])}
+    out = {"indices": [], "alerts": [], "available": True, "note": None}
+
+    for sym, v in (index_setups or {}).items():
+        idx = v.get("idx") or {}
+        spot = idx.get("ltp")
+        if not spot:
+            continue
+        meta = next((i for i in config.INDICES if i["sym"] == sym), {})
+        name, exch = meta.get("opt"), meta.get("opt_exch", "NFO")
+        if not name:
+            continue
+
+        # the underlying read both sides are graded against
+        bullish = bool(idx.get("ltp") and idx.get("vwap") and idx["ltp"] > idx["vwap"])
+        und = {"bullish": bullish,
+               "label": f"{'above' if bullish else 'below'} VWAP · "
+                        f"{(idx.get('stack') or {}).get('label', 'no stack')}"}
+        sub = {"sym": sym, "spot": spot, "CE": [], "PE": [],
+               "best_ce": None, "best_pe": None}
+
+        for side in ("CE", "PE"):
+            try:
+                chain = client.option_chain(name, kind=side, exchange=exch)
+                quoted = client.quote_strikes(chain, spot, width=5)
+            except Exception as exc:                       # noqa: BLE001
+                log.warning("accumulation chain %s %s failed: %s", sym, side, exc)
+                continue
+
+            rows = []
+            for c in quoted:
+                # Angel does not return impliedVolatility, so when the field is
+                # absent it is solved from the premium instead of left blank.
+                iv = c.get("iv")
+                iv_src = "broker"
+                if iv in (None, "", 0):
+                    iv = accumulation.implied_vol(
+                        c.get("prem"), spot, c.get("strike"),
+                        c.get("expiry"), side)
+                    iv_src = "solved" if iv else None
+                rows.append({
+                    "sym": sym, "strike": c.get("strike"), "side": side,
+                    "symbol": c.get("symbol"), "prem": c.get("prem"),
+                    "oi": c.get("oi"), "vol": c.get("vol"),
+                    "spread": c.get("spread"), "iv": iv, "iv_source": iv_src,
+                    "delta": accumulation.option_delta(
+                        spot, c.get("strike"), c.get("expiry"), iv, side),
+                    "expiry": c.get("expiry"), "lotsize": c.get("lotsize"),
+                    "bid_qty": c.get("bid_qty"), "ask_qty": c.get("ask_qty"),
+                })
+            graded = accumulation.rank_chain(
+                rows, {"underlying": und,
+                       "sector": sector_by_name.get(idx.get("sector"))})
+            sub[side] = graded
+            if graded:
+                top = graded[0]
+                sub["best_" + side.lower()] = top
+                if (top.get("score") or 0) >= 80 and not top["traps"] and not top["thin"]:
+                    out["alerts"].append(top)
+
+        if sub["CE"] or sub["PE"]:
+            out["indices"].append(sub)
+
+    out["alerts"].sort(key=lambda a: -(a["score"] or 0))
+    if not out["indices"]:
+        out["available"] = False
+        out["note"] = ("No option chain quoted. The radar needs live strike "
+                       "quotes with open interest, which the broker only "
+                       "returns when the chain is available.")
+    return out
+
+
 def full_scan() -> dict:
     minutes = now_ist().hour * 60 + now_ist().minute
     win = engine.time_window(minutes)
 
-    stocks = [s for s in (stock_snapshot(sym) for sym in config.UNIVERSE) if s]
+    quotes = fetch_quotes(config.UNIVERSE)
+    stocks = [s for s in (stock_snapshot(sym, quotes.get(sym))
+                          for sym in config.UNIVERSE) if s]
     # Stale means the broker gave us an OLD session. Symbols that simply
     # failed to fetch are a fetch problem, counted and reported separately -
     # they must never make a live session look closed.
@@ -870,6 +1121,10 @@ def full_scan() -> dict:
             row["alert"] = engine.alert_level(
                 row.get("count", 0) * 14, row.get("count", 0), [])
 
+    _acc = (accumulation_radar(index_setups, sector_rows, ctx) if not stale else
+            {"indices": [], "alerts": [], "available": False,
+             "note": "Feed is not live. Accumulation is not scored on a stale book."})
+
     return {
         "read": engine.market_read(label, fear, breadth, vix, win, best),
         "top_ce_watch": top_ce_watch, "top_pe_watch": top_pe_watch,
@@ -888,6 +1143,9 @@ def full_scan() -> dict:
         "scanners": scanners,
         "tiers": {t: len([r for r in ranked if engine.tier(r["score"]) == t])
                   for t in ("JACKPOT", "STRONG", "GOOD", "WATCHLIST", "IGNORE")},
+        "accumulation": _acc,
+        "golden": golden_jackpot(ranked, stocks, indices, sector_rows,
+                                 _acc, breadth),
         "index_setups": index_setups, "index_radar": index_radar,
         "index_cards": index_option_cards(index_setups, ctx),
         "sector_rows": sector_rows, "breadth": breadth,

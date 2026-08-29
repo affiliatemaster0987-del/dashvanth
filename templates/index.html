@@ -10,11 +10,11 @@
                font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
                -webkit-font-smoothing: antialiased; min-height: 100%; }
   #root { min-height: 100vh; }
-  .krt-boot { padding: 28px 20px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; }
-  .krt-boot .b { color: #FFA033; letter-spacing: .26em; font-size: 10px; }
-  .krt-boot .h { font-size: 16px; font-weight: 700; margin: 8px 0 12px; }
-  .krt-boot .m { color: #8A93A6; line-height: 1.7; }
-  .krt-boot .e { color: #FF4D5E; background: rgba(255,77,94,.07);
+  #krt-boot { padding: 28px 20px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; }
+  #krt-boot .b { color: #FFA033; letter-spacing: .26em; font-size: 10px; }
+  #krt-boot .h { font-size: 16px; font-weight: 700; margin: 8px 0 12px; }
+  #krt-boot .m { color: #8A93A6; line-height: 1.7; }
+  #krt-boot .e { color: #FF4D5E; background: rgba(255,77,94,.07);
                  border: 1px solid rgba(255,77,94,.33); border-radius: 3px;
                  padding: 12px; margin-top: 10px; line-height: 1.6;
                  white-space: pre-wrap; word-break: break-word; font-size: 11px; }
@@ -22,12 +22,15 @@
 </head>
 <body>
 
-<div id="root">
-  <div class="krt-boot" id="krt-boot">
-    <div class="b">KRT AI</div>
-    <div class="m">Loading the terminal&hellip;</div>
-  </div>
+<!-- Boot and error messages live HERE, outside #root.
+     React owns #root exclusively; nothing else may touch its children,
+     or React's DOM bookkeeping breaks with a removeChild error. -->
+<div id="krt-boot">
+  <div class="b">KRT AI</div>
+  <div class="m">Loading the terminal&hellip;</div>
 </div>
+
+<div id="root"></div>
 
 <noscript>
   <div style="padding:28px 20px;font-family:monospace;color:#8A93A6">
@@ -37,25 +40,23 @@
 
 <script>
 /* The screen must never go silently black. Anything that stops the bundle
-   from running is printed here, because a blank page tells a trader nothing. */
+   from running is printed in #krt-boot, never inside #root. */
 (function () {
   function show(title, detail) {
-    var r = document.getElementById("root");
-    if (!r || window.__KRT_MOUNTED) return;
-    r.innerHTML = "";
-    var w = document.createElement("div"); w.className = "krt-boot";
+    var boot = document.getElementById("krt-boot");
+    if (!boot) return;
+    boot.style.display = "block";
+    boot.textContent = "";
     var b = document.createElement("div"); b.className = "b"; b.textContent = "KRT AI";
     var h = document.createElement("div"); h.className = "h"; h.textContent = title;
     var e = document.createElement("div"); e.className = "e"; e.textContent = detail;
-    w.appendChild(b); w.appendChild(h); w.appendChild(e); r.appendChild(w);
+    boot.appendChild(b); boot.appendChild(h); boot.appendChild(e);
   }
   window.addEventListener("error", function (ev) {
     if (ev && ev.target && ev.target.tagName === "SCRIPT") {
       show("The terminal script did not load.",
            "Failed to fetch: " + (ev.target.src || "/static/terminal.js") +
-           "\n\nOpen that path directly in the browser. A 404 means the file is missing " +
-           "from the deploy — check that static/terminal.js was committed and is not " +
-           "matched by a .gitignore rule.");
+           "\n\nOpen that path directly. A 404 means the file is missing from the deploy.");
       return;
     }
     show("The terminal hit a script error.",
@@ -72,8 +73,8 @@
          "/static/terminal.js was requested but nothing mounted within 8 seconds.\n\n" +
          "Open /static/terminal.js directly:\n" +
          "  \u2022 404 \u2014 the file is not in the deploy.\n" +
-         "  \u2022 HTML instead of JavaScript \u2014 the route is falling through to index.html.\n" +
-         "  \u2022 JavaScript \u2014 the file loaded but stopped early; the error above names why.");
+         "  \u2022 HTML instead of JavaScript \u2014 the route falls through to index.html.\n" +
+         "  \u2022 JavaScript \u2014 it loaded but stopped early; the error above names why.");
   }, 8000);
 })();
 </script>

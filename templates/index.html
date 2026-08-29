@@ -5,86 +5,37 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0A0D14">
 <title>KRT AI Option Command Center</title>
-<link rel="stylesheet" href="/static/style.css">
+<style>
+  html, body { margin: 0; padding: 0; background: #0A0D14; color: #E8EAF0;
+               font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+               -webkit-font-smoothing: antialiased; min-height: 100%; }
+  #root { min-height: 100vh; }
+  #boot { padding: 40px 20px; text-align: center;
+          font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; }
+  #boot .b { color: #FFA033; letter-spacing: .26em; font-size: 10px; }
+  #boot .m { color: #8A93A6; margin-top: 10px; line-height: 1.7; }
+</style>
 </head>
 <body>
 
-<div class="shell">
-
-  <nav class="rail" role="tablist" aria-label="Terminal sections">
-    <div class="brand">
-      <div class="eyebrow mono">KRT AI</div>
-      <div class="name">OPTION<br>COMMAND<br>CENTER</div>
-      <div class="tag mono">Detect the move<br>before the crowd</div>
+<div id="root">
+  <div id="boot">
+    <div class="b">KRT AI</div>
+    <div class="m">
+      Loading the terminal&hellip;<br>
+      If this message stays, JavaScript is blocked or the CDN is unreachable.
     </div>
-
-    <button class="bn" data-tab="command" role="tab" aria-selected="true">
-      <div class="lbl mono">COMMAND</div>
-      <div class="sub mono">order &middot; pressure</div>
-    </button>
-    <button class="bn" data-tab="setups" role="tab" aria-selected="false">
-      <div class="lbl mono">SETUPS<span class="count mono" id="cnt-setups"></span></div>
-      <div class="sub mono">CE / PE board</div>
-    </button>
-    <button class="bn" data-tab="flow" role="tab" aria-selected="false">
-      <div class="lbl mono">FLOW</div>
-      <div class="sub mono">index &middot; chain</div>
-    </button>
-    <button class="bn" data-tab="radar" role="tab" aria-selected="false">
-      <div class="lbl mono">RADAR<span class="count mono" id="cnt-radar"></span></div>
-      <div class="sub mono">scanners &middot; movers</div>
-    </button>
-    <button class="bn" data-tab="news" role="tab" aria-selected="false">
-      <div class="lbl mono">NEWS<span class="count mono" id="cnt-news"></span></div>
-      <div class="sub mono">headlines</div>
-    </button>
-    <button class="bn" data-tab="journal" role="tab" aria-selected="false">
-      <div class="lbl mono">JOURNAL<span class="count mono" id="cnt-calls"></span></div>
-      <div class="sub mono">calls &middot; risk</div>
-    </button>
-    <button class="bn" data-tab="system" role="tab" aria-selected="false">
-      <div class="lbl mono">SYSTEM</div>
-      <div class="sub mono">health &middot; accuracy</div>
-    </button>
-  </nav>
-
-  <main>
-    <header class="topbar">
-      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-        <span class="clock mono" id="clock">--:--:--</span>
-        <span id="session"></span>
-        <span id="indices" style="display:flex;gap:14px;flex-wrap:wrap"></span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span id="feedstate"></span>
-        <button id="refresh" class="st mono" title="Reload now">REFRESH</button>
-      </div>
-    </header>
-
-    <div class="wrap">
-      <div id="alerts"></div>
-
-      <section class="panel" data-panel="command"></section>
-      <section class="panel" data-panel="setups" hidden></section>
-      <section class="panel" data-panel="flow" hidden></section>
-      <section class="panel" data-panel="radar" hidden></section>
-      <section class="panel" data-panel="news" hidden></section>
-      <section class="panel" data-panel="journal" hidden></section>
-      <section class="panel" data-panel="system" hidden></section>
-    </div>
-
-    <footer class="foot">
-      <p>
-        Scores, levels and targets are produced by the scanner from broker data. They are not
-        advice and not a promise. Options can lose the whole premium paid. Every hit-rate figure
-        counts only calls that actually filled &mdash; check the SYSTEM tab before trusting a
-        number, and check it again when the feed goes stale.
-      </p>
-    </footer>
-  </main>
-
+  </div>
 </div>
 
-<script src="/static/app.js"></script>
+<noscript>
+  <div style="padding:40px 20px;text-align:center;font-family:monospace;color:#8A93A6">
+    This terminal needs JavaScript.
+  </div>
+</noscript>
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="/static/terminal.js"></script>
 </body>
 </html>

@@ -625,6 +625,17 @@ def next_session(ranked, sector_rows, indices) -> dict:
     }
 
 
+def _row_view(it):
+    """
+    Ranked rows keep the stock under "st"; scanner rows are flat. One reader
+    for both so every board can be given a contract, not just the flat ones.
+    """
+    st = it.get("st") if isinstance(it.get("st"), dict) else None
+    if st:
+        return st.get("sym"), it.get("side") or st.get("side"), st.get("ltp")
+    return it.get("sym"), it.get("side"), it.get("ltp")
+
+
 def attach_strikes(items, key_sym="sym", key_side="side"):
     """
     Give every row a concrete option to buy, with a live premium and the
@@ -636,8 +647,7 @@ def attach_strikes(items, key_sym="sym", key_side="side"):
         return items
     picks, rows = {}, []
     for it in items:
-        sym, side = it.get(key_sym), it.get(key_side)
-        spot = it.get("ltp")
+        sym, side, spot = _row_view(it)
         if not sym or not side or not spot:
             continue
         try:
@@ -657,11 +667,23 @@ def attach_strikes(items, key_sym="sym", key_side="side"):
             continue
         q = prem_map.get(str(best["token"])) or {}
         prem = q.get("prem")
+        _sym, side, spot = _row_view(it)
+
+        # IV is not in the quote, so it is solved from the premium; delta then
+        # converts the underlying plan into premium levels the trader can use.
+        iv = accumulation.implied_vol(prem, spot, best["strike"], best["expiry"], side)
+        dlt = accumulation.option_delta(spot, best["strike"], best["expiry"], iv, side)
+        plan = quant.option_plan(
+            {**(it.get("legs") or (it.get("st") or {}).get("legs") or {}),
+             "entry": spot},
+            prem, dlt, best.get("lotsize"), q.get("spread"))
+
         it["option"] = {
             "strike": best["strike"], "symbol": best["symbol"],
             "expiry": best["expiry"], "lotsize": best.get("lotsize"),
             "prem": prem, "oi": q.get("oi"), "vol": q.get("vol"),
             "spread": q.get("spread"),
+            "iv": iv, "delta": dlt, "plan": plan,
             "zone": engine.entry_zone(prem, q.get("spread") or 0) if prem else None,
             "quoted_at": stamp if prem else None,
             "liquid": bool(prem and q.get("spread") is not None
@@ -1098,10 +1120,20 @@ def full_scan() -> dict:
         [r for r in ranked if r["st"]["sector"] == lead and r["side"] == "CE"],
         key=lambda r: r["score"], reverse=True)[:4] if lead else []
 
-    # a buyable contract on every row the trader might act from
+    # a buyable contract on every row the trader might act from.
+    # Collected into ONE list first: nearest_strike is in-memory and free, and
+    # batch_premiums quotes the whole set in a single request, so adding the
+    # CE/PE boards and the radars costs one call rather than five.
+    to_price = []
     for bucket in scanners.values():
-        attach_strikes(bucket)
-    attach_strikes(top_setups)
+        to_price.extend(bucket)
+    to_price.extend(top_setups)
+    to_price.extend(ce_box)
+    to_price.extend(pe_box)
+    to_price.extend(near)
+    to_price.extend(radar)
+    to_price.extend(lead_stocks)
+    attach_strikes(to_price)
     mv = movers(stocks)
     for name in ("gainers", "losers", "volume_shockers", "price_shockers",
                  "active_by_value"):

@@ -458,7 +458,26 @@ def option_plan(legs, prem, delta, lotsize=None, spread=None):
     t1, t2, t3 = (prem_at(legs.get("t1")), prem_at(legs.get("t2")),
                   prem_at(legs.get("t3")))
 
+    # A last gate before any of this reaches a screen.
+    #
+    # A premium plan is only meaningful if the levels came from the SAME stock
+    # the contract is written on. When they did not - a crossed lookup, a stale
+    # row - the arithmetic still "works" and produces a stop of 845 against a
+    # premium of 8.95, which reads as a real number and is not one. Anything
+    # implausibly far from the premium is refused rather than shown.
+    levels = [x for x in (sl, t1, t2, t3) if x is not None]
+    if levels and (max(levels) > prem * 6 or min(levels) < 0):
+        return {"ok": False,
+                "why": ("The stop and targets do not belong to this contract - they sit far "
+                        "outside any plausible range for a premium of "
+                        f"{round(prem, 2)}. Nothing is shown rather than a wrong number.")}
+
     risk = round(prem - sl, 2) if sl is not None else None
+    if risk is not None and risk <= 0:
+        return {"ok": False,
+                "why": ("The stop sits at or above the entry premium, so there is no risk to "
+                        "measure. That is a bad plan, not a free trade.")}
+
     rr = None
     if risk and risk > 0 and t2 is not None:
         rr = round((t2 - prem) / risk, 2)

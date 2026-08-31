@@ -667,7 +667,7 @@ def attach_strikes(items, key_sym="sym", key_side="side", stocks_by=None, win=No
             continue
         q = prem_map.get(str(best["token"])) or {}
         prem = q.get("prem")
-        _sym, side, spot = _row_view(it)
+        sym, side, spot = _row_view(it)
 
         # IV is not in the quote, so it is solved from the premium; delta then
         # converts the underlying plan into premium levels the trader can use.
@@ -678,8 +678,12 @@ def attach_strikes(items, key_sym="sym", key_side="side", stocks_by=None, win=No
         # half plan, which is worse than none - so the same ATR ladder the
         # setups use is built here from the underlying snapshot.
         legs = it.get("legs") or (it.get("st") or {}).get("legs")
-        if not legs and stocks_by:
+        if not legs and stocks_by and sym:
             st_row = stocks_by.get(sym)
+            # a plan may only ever be built from the row's OWN stock
+            if st_row and st_row.get("sym") != sym:
+                log.error("stock lookup mismatch: row %s got %s", sym, st_row.get("sym"))
+                st_row = None
             # target_engine reads the period levels as well as ATR, so the
             # whole set has to be present before it is called
             need = ("atr", "ltp", "pdh", "pdl", "pwh", "pwl", "pmh", "pml")
@@ -841,6 +845,10 @@ def golden_jackpot(ranked, stocks, indices, sector_rows, acc, breadth):
         out.append({
             "sym": sym, "side": side, "sector": st.get("sector"),
             "ltp": st.get("ltp"), "legs": r.get("legs"),
+            # the ranked row was already given a contract in the batched pass,
+            # so the golden card can name it without another quote
+            "option": r.get("option"),
+            "times": st.get("times") or {},
             "level": level, "level_name": "PREV DAY HIGH" if side == "CE" else "PREV DAY LOW",
             "engine_score": r.get("score"),
             "golden": g, "mtf": ctx["mtf"], "zone": ctx["zone"],

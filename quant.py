@@ -415,3 +415,67 @@ def golden_score(ctx):
             f"more of the picture exists." ) if thin else None,
         "unavailable": UNAVAILABLE,
     }
+
+# ------------------------------------------------------- option plan
+def option_plan(legs, prem, delta, lotsize=None, spread=None):
+    """
+    Turn an underlying plan into a PREMIUM plan.
+
+    The scanner's stop and targets are levels on the stock or index. A trader
+    holding the option needs them in rupees of premium, and the bridge is
+    delta: a one-rupee move in the underlying moves the premium by roughly
+    delta rupees.
+
+    This is an approximation and is labelled as one. Delta itself drifts as
+    price moves (gamma), and time decay pulls the premium down every hour the
+    move does not happen, so the further target is the least reliable number
+    here. It is still far better than showing a trader a stock level when the
+    position is an option.
+    """
+    if not legs or not prem or prem <= 0 or not delta:
+        return None
+    entry = legs.get("entry") or legs.get("ltp")
+    if entry is None:
+        # the scanner's legs are anchored on the underlying LTP
+        entry = legs.get("spot")
+    if entry is None:
+        return None
+
+    d = abs(float(delta))
+    if d < 0.05:
+        return {"ok": False,
+                "why": f"delta {round(float(delta), 3)} is too small - the premium "
+                       f"barely responds to the underlying, so a premium target "
+                       f"would be fiction."}
+
+    def prem_at(level):
+        if level is None:
+            return None
+        move = (level - entry) * (1 if float(delta) > 0 else -1)
+        return round(max(0.05, prem + d * move), 2)
+
+    sl = prem_at(legs.get("sl"))
+    t1, t2, t3 = (prem_at(legs.get("t1")), prem_at(legs.get("t2")),
+                  prem_at(legs.get("t3")))
+
+    risk = round(prem - sl, 2) if sl is not None else None
+    rr = None
+    if risk and risk > 0 and t2 is not None:
+        rr = round((t2 - prem) / risk, 2)
+
+    lo = round(prem - (spread or 0) / 2, 2) if spread else round(prem * 0.99, 2)
+    hi = round(prem + (spread or 0) / 2, 2) if spread else round(prem * 1.01, 2)
+
+    return {
+        "ok": True,
+        "entry_low": max(0.05, lo), "entry_high": hi,
+        "prem": prem, "sl": sl, "t1": t1, "t2": t2, "t3": t3,
+        "risk_per_unit": risk, "rr": rr,
+        "lotsize": lotsize,
+        "risk_per_lot": round(risk * lotsize, 2) if (risk and lotsize) else None,
+        "cost_per_lot": round(prem * lotsize, 2) if lotsize else None,
+        "delta": round(float(delta), 3),
+        "basis": (f"Premium levels are the underlying plan converted at delta "
+                  f"{round(d, 2)}. They are an estimate: delta moves as price "
+                  f"moves, and time decay works against you while you wait."),
+    }

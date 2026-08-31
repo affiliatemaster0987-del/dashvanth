@@ -289,6 +289,7 @@ def snapshot():
             "times": r.get("times", {}),
             "levels": {k: r["st"][k] for k in
                        ("pdh", "pdl", "pwh", "pwl", "pmh", "pml")},
+            "option": r.get("option"),
             "prev_date": r["st"].get("prev_date"),
             "session_date": r["st"].get("session_date"),
             "session_is_today": bool(r["st"].get("session_is_today")),

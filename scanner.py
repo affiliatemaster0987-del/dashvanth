@@ -636,7 +636,7 @@ def _row_view(it):
     return it.get("sym"), it.get("side"), it.get("ltp")
 
 
-def attach_strikes(items, key_sym="sym", key_side="side"):
+def attach_strikes(items, key_sym="sym", key_side="side", stocks_by=None, win=None):
     """
     Give every row a concrete option to buy, with a live premium and the
     time it was quoted. Strikes come from the in-memory instrument master
@@ -673,9 +673,27 @@ def attach_strikes(items, key_sym="sym", key_side="side"):
         # converts the underlying plan into premium levels the trader can use.
         iv = accumulation.implied_vol(prem, spot, best["strike"], best["expiry"], side)
         dlt = accumulation.option_delta(spot, best["strike"], best["expiry"], iv, side)
+        # Some boards (volume leaders, the pre-move list) name a symbol but
+        # carry no stop or targets. Showing an entry with blank levels is a
+        # half plan, which is worse than none - so the same ATR ladder the
+        # setups use is built here from the underlying snapshot.
+        legs = it.get("legs") or (it.get("st") or {}).get("legs")
+        if not legs and stocks_by:
+            st_row = stocks_by.get(sym)
+            # target_engine reads the period levels as well as ATR, so the
+            # whole set has to be present before it is called
+            need = ("atr", "ltp", "pdh", "pdl", "pwh", "pwl", "pmh", "pml")
+            if st_row and all(st_row.get(k) is not None for k in need):
+                try:
+                    legs = engine.target_engine(st_row, side, win or {"key": "LOW"})
+                    it["legs"] = legs
+                    it["legs_source"] = "derived"
+                except Exception as exc:                   # noqa: BLE001
+                    log.debug("derived legs failed for %s: %s", sym, exc)
+                    legs = None
+
         plan = quant.option_plan(
-            {**(it.get("legs") or (it.get("st") or {}).get("legs") or {}),
-             "entry": spot},
+            {**(legs or {}), "entry": spot},
             prem, dlt, best.get("lotsize"), q.get("spread"))
 
         it["option"] = {
@@ -684,6 +702,7 @@ def attach_strikes(items, key_sym="sym", key_side="side"):
             "prem": prem, "oi": q.get("oi"), "vol": q.get("vol"),
             "spread": q.get("spread"),
             "iv": iv, "delta": dlt, "plan": plan,
+            "legs_source": it.get("legs_source", "setup"),
             "zone": engine.entry_zone(prem, q.get("spread") or 0) if prem else None,
             "quoted_at": stamp if prem else None,
             "liquid": bool(prem and q.get("spread") is not None
@@ -1133,7 +1152,8 @@ def full_scan() -> dict:
     to_price.extend(near)
     to_price.extend(radar)
     to_price.extend(lead_stocks)
-    attach_strikes(to_price)
+    stocks_by = {s["sym"]: s for s in stocks}
+    attach_strikes(to_price, stocks_by=stocks_by, win=win)
     mv = movers(stocks)
     for name in ("gainers", "losers", "volume_shockers", "price_shockers",
                  "active_by_value"):

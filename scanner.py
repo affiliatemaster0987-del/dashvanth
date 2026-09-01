@@ -958,7 +958,13 @@ def full_scan() -> dict:
     minutes = now_ist().hour * 60 + now_ist().minute
     win = engine.time_window(minutes)
 
-    quotes = fetch_quotes(config.UNIVERSE)
+    # One failed quote call must not take the whole scan down with it. The
+    # candle path can still produce a board; it just gets labelled as inferred.
+    try:
+        quotes = fetch_quotes(config.UNIVERSE)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("batched quote call failed, falling back to candles: %s", exc)
+        quotes = {}
     stocks = [s for s in (stock_snapshot(sym, quotes.get(sym))
                           for sym in config.UNIVERSE) if s]
     # Stale means the broker gave us an OLD session. Symbols that simply
@@ -1185,7 +1191,26 @@ def full_scan() -> dict:
             {"indices": [], "alerts": [], "available": False,
              "note": "Feed is not live. Accumulation is not scored on a stale book."})
 
+    # An empty board and a broken scan look identical on screen. They are not
+    # the same thing, so the reason is worked out here and stated.
+    empty_reason = None
+    if not stocks and not indices:
+        if not getattr(client, "instruments_ready", lambda: True)():
+            empty_reason = ("The instrument master has not finished downloading. Symbols cannot "
+                            "be resolved to tokens yet, so nothing could be scanned. This clears "
+                            "itself a minute or two after a restart.")
+        elif nodata_n and not fresh_n and not old_n:
+            empty_reason = ("Every symbol failed to return candles. That is a broker or network "
+                            "problem, not a quiet market.")
+        else:
+            empty_reason = ("The scan produced no symbols at all. Check SYSTEM for the broker "
+                            "connection and the instrument count.")
+    elif stocks and not any(r for r in ranked):
+        empty_reason = None      # a genuinely quiet board - not an error
+
     return {
+        "empty_reason": empty_reason,
+        "universe_size": len(config.UNIVERSE),
         "read": engine.market_read(label, fear, breadth, vix, win, best),
         "top_ce_watch": top_ce_watch, "top_pe_watch": top_pe_watch,
         "side_strength": engine.side_strength(best_ce_score, best_pe_score),

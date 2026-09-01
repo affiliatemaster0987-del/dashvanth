@@ -715,6 +715,40 @@ def attach_strikes(items, key_sym="sym", key_side="side", stocks_by=None, win=No
     return items
 
 
+def _index_contract(pick, q, prem, idx, legs, side, exch):
+    """
+    The index card's contract, with the plan expressed in PREMIUM.
+
+    The card used to carry a strike and a premium but leave the stop and
+    targets on the index itself, so the screen offered a "best setup" with no
+    entry, no stop and no target. A plan the trader cannot act on is not a
+    plan; when the premium or the delta will not solve, the card says the data
+    is incomplete instead of showing a strike on its own.
+    """
+    if not prem:
+        return None
+    iv = accumulation.implied_vol(prem, idx.get("ltp"), pick["strike"],
+                                  pick.get("expiry"), side)
+    dlt = accumulation.option_delta(idx.get("ltp"), pick["strike"],
+                                    pick.get("expiry"), iv, side)
+    plan = quant.option_plan({**(legs or {}), "entry": idx.get("ltp")},
+                             prem, dlt, pick.get("lotsize"), q.get("spread"))
+    return {
+        "strike": pick["strike"], "symbol": pick["symbol"],
+        "expiry": pick["expiry"], "lotsize": pick.get("lotsize"), "prem": prem,
+        "oi": q.get("oi"), "vol": q.get("vol"), "spread": q.get("spread"),
+        "iv": iv, "iv_source": "solved" if iv else None, "delta": dlt,
+        "plan": plan,
+        "zone": engine.entry_zone(prem, q.get("spread") or 0),
+        "quoted_at": now_ist().strftime("%H:%M:%S"),
+        "liquid": bool(q.get("spread") is not None and q["spread"] / prem < 0.05),
+        "tradable": bool(plan and plan.get("ok")),
+        "why_untradable": None if (plan and plan.get("ok")) else (
+            (plan or {}).get("why")
+            or "The premium plan could not be solved for this contract."),
+    }
+
+
 def index_option_cards(setups, ctx):
     """
     A tradable option card per index, with the strike, live premium, OI and
@@ -778,15 +812,7 @@ def index_option_cards(setups, ctx):
                          "PUT WRITING - supports CE" if pcr > 1.2 else
                          "CALL WRITING - supports PE" if pcr < 0.8 else
                          "BALANCED - no option-chain edge"),
-            "option": {
-                "strike": pick["strike"], "symbol": pick["symbol"],
-                "expiry": pick["expiry"], "prem": prem,
-                "oi": q.get("oi"), "vol": q.get("vol"), "spread": q.get("spread"),
-                "zone": engine.entry_zone(prem, q.get("spread") or 0) if prem else None,
-                "quoted_at": now_ist().strftime("%H:%M:%S") if prem else None,
-                "liquid": bool(prem and q.get("spread") is not None
-                               and q["spread"] / prem < 0.05),
-            } if prem else None,
+            "option": _index_contract(pick, q, prem, idx, legs, side, exch),
         })
     cards.sort(key=lambda c: c["score"], reverse=True)
     return cards

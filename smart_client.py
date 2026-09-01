@@ -118,6 +118,15 @@ class SmartClient:
                 return row["token"]
         return None
 
+    def instruments_ready(self):
+        """
+        True once the scrip master is indexed. Without it token_for returns
+        None for every symbol and the whole scan comes back empty, which on
+        screen is indistinguishable from a quiet market. It is not the same
+        thing, so the scanner asks before blaming the market.
+        """
+        return bool(self.by_symbol)
+
     def token_for(self, symbol):
         row = self.by_symbol.get(symbol.upper())
         return row["token"] if row else None

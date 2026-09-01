@@ -313,6 +313,8 @@ def snapshot():
         "commander": snap["commander"], "risk": snap["risk"],
         "accumulation": snap.get("accumulation"),
         "golden": snap.get("golden"),
+        "empty_reason": snap.get("empty_reason"),
+        "universe_size": snap.get("universe_size"),
         "top_ce": slim(snap["top_ce"]), "top_pe": slim(snap["top_pe"]),
         "jackpot_ce": [slim(r) for r in snap["jackpot_ce"]],
         "jackpot_pe": [slim(r) for r in snap["jackpot_pe"]],

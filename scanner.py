@@ -176,6 +176,87 @@ def _confirmation(intra, level, up):
     return True, bool(follow)
 
 
+# ------------------------------------------------------------- break log
+#
+# The board could already say "this is above its previous day high", but not
+# WHEN it crossed. Those are different facts: a level taken at 09:30 with
+# volume is a different trade from the same level taken at 14:50 on a drift,
+# and by the time a scan runs the crossing has already happened.
+#
+# So each scan compares the current price against the levels and records the
+# FIRST time each one is taken. The record is kept for the session and never
+# rewritten - a level cannot be broken twice - so the log reads as a timeline
+# rather than a snapshot.
+_breaks = {}          # (sym, side, key) -> entry
+_breaks_day = None
+
+BREAK_LEVELS = [
+    ("pdh", "PREV DAY HIGH",   "CE"), ("pdl", "PREV DAY LOW",   "PE"),
+    ("pwh", "PREV WEEK HIGH",  "CE"), ("pwl", "PREV WEEK LOW",  "PE"),
+    ("pmh", "PREV MONTH HIGH", "CE"), ("pml", "PREV MONTH LOW", "PE"),
+    ("or5h", "FIRST 5-MIN HIGH", "CE"), ("or5l", "FIRST 5-MIN LOW", "PE"),
+    ("orh", "OPENING RANGE HIGH", "CE"), ("orl", "OPENING RANGE LOW", "PE"),
+]
+
+
+def record_breaks(stocks, win):
+    """Log any level taken since the last scan, with the time it happened."""
+    global _breaks_day
+    today = now_ist().strftime("%Y-%m-%d")
+    if _breaks_day != today:
+        _breaks.clear()
+        _breaks_day = today
+
+    stamp = now_ist().strftime("%H:%M")
+    for st in stocks or []:
+        ltp, sym = st.get("ltp"), st.get("sym")
+        if not ltp or not sym:
+            continue
+        for key, label, side in BREAK_LEVELS:
+            level = st.get(key)
+            if not level:
+                continue
+            taken = ltp > level if side == "CE" else ltp < level
+            if not taken:
+                continue
+            ident = (sym, side, key)
+            if ident in _breaks:
+                continue
+            _breaks[ident] = {
+                "sym": sym, "side": side, "key": key, "level_name": label,
+                "level": round(level, 2), "at": stamp,
+                "sector": st.get("sector"),
+                "ltp_at_break": round(ltp, 2), "ltp": round(ltp, 2),
+                "vol_ratio": st.get("vol_ratio"),
+                "vwap_ok": (ltp > st["vwap"]) if st.get("vwap") else None,
+                "window": (win or {}).get("key"),
+                "move_pct": None,
+            }
+
+    # keep the live price and the move since the break current
+    by_sym = {st["sym"]: st for st in (stocks or []) if st.get("sym")}
+    for e in _breaks.values():
+        st = by_sym.get(e["sym"])
+        if st and st.get("ltp"):
+            e["ltp"] = round(st["ltp"], 2)
+            base = e["ltp_at_break"]
+            if base:
+                move = (st["ltp"] - base) / base * 100
+                e["move_pct"] = round(move if e["side"] == "CE" else -move, 2)
+            e["vol_ratio"] = st.get("vol_ratio")
+
+    rows = sorted(_breaks.values(), key=lambda e: e["at"], reverse=True)
+    return {
+        "ce": [e for e in rows if e["side"] == "CE"],
+        "pe": [e for e in rows if e["side"] == "PE"],
+        "count": len(rows),
+        "note": ("Each row is the first time that level was taken today. The time is when the "
+                 "scan first saw price beyond it, so it is accurate to the scan interval, not "
+                 "to the tick."),
+    }
+
+
+
 # ------------------------------------------------------------- broker quotes
 def _num(v):
     """Angel returns numbers as strings often enough to matter."""
@@ -273,10 +354,15 @@ def stock_snapshot(sym: str, quote: dict | None = None) -> dict | None:
     e20, e50, e200 = engine.ema(closes, 20), engine.ema(closes, 50), engine.ema(closes, 200)
     stack = engine.trend_stack(ltp, e20, e50, e200)
 
-    # opening range = first three 5-minute candles
+    # Two opening ranges, not one. The 15-minute range is what the scanner
+    # scores against; the first 5-minute candle is a separate, faster level
+    # that a trader watches in the opening minutes, and collapsing them into
+    # one number loses the early break entirely.
     opening = intra[:3]
     orh = max((c["h"] for c in opening), default=None)
     orl = min((c["l"] for c in opening), default=None)
+    or5h = intra[0]["h"] if intra else None
+    or5l = intra[0]["l"] if intra else None
 
     # move over the last ~15 minutes, for the crash / surge detector
     recent = intra[-3:] if len(intra) >= 4 else []
@@ -320,6 +406,8 @@ def stock_snapshot(sym: str, quote: dict | None = None) -> dict | None:
         "ema20": e20, "ema50": e50, "ema200": e200, "stack": stack,
         "orh": round(orh, 2) if orh else None,
         "orl": round(orl, 2) if orl else None,
+        "or5h": round(or5h, 2) if or5h else None,
+        "or5l": round(or5l, 2) if or5l else None,
         "window_pct": round(win_pct, 2) if fresh else 0.0,
         "fresh": fresh, "candle_state": cstate,
         "_intra": intra, "_daily": daily,
@@ -1192,6 +1280,11 @@ def full_scan() -> dict:
     to_price.extend(near)
     to_price.extend(radar)
     to_price.extend(lead_stocks)
+    # log the level breaks before pricing, so each one can carry a contract
+    breaks = record_breaks(stocks, win)
+    to_price.extend(breaks["ce"])
+    to_price.extend(breaks["pe"])
+
     stocks_by = {s["sym"]: s for s in stocks}
     attach_strikes(to_price, stocks_by=stocks_by, win=win)
     mv = movers(stocks)
@@ -1252,6 +1345,7 @@ def full_scan() -> dict:
                         f"({n_tokens} resolved to tokens).")
 
     return {
+        "breaks": breaks,
         "empty_reason": empty_reason,
         "universe_size": n_universe,
         "tokens_resolved": n_tokens,

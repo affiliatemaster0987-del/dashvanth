@@ -20,19 +20,38 @@ from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
-import config
-import db
-import engine
-import news as news_mod
-import notify
-import scanner
-import tracker
-from smart_client import client, now_ist
+# ---------------------------------------------------------------- local
+# A missing or broken module here used to abort the import and take the whole
+# deploy down, so the only symptom was "Failed" in the Render dashboard with
+# the reason buried in a build log. The app now starts either way and serves
+# the reason on /, so the screen can say what is wrong instead of nothing.
+BOOT_ERROR = None
+try:
+    import config
+    import db
+    import engine
+    import news as news_mod
+    import notify
+    import scanner
+    import tracker
+    from smart_client import client, now_ist
+except Exception as _exc:                                  # noqa: BLE001
+    import traceback
+    BOOT_ERROR = {
+        "error": f"{type(_exc).__name__}: {_exc}",
+        "trace": traceback.format_exc()[-2000:],
+        "hint": ("A module failed to import. The usual cause is a file missing from the repo - "
+                 "deleting a .py file and re-uploading it fires a deploy in between, and that "
+                 "deploy has nothing to import. Expected at the repo root: config.py, db.py, "
+                 "engine.py, news.py, notify.py, scanner.py, tracker.py, smart_client.py, "
+                 "accumulation.py, quant.py, app.py."),
+    }
+    logging.getLogger("app").error("boot import failed: %s", _exc)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -213,8 +232,18 @@ def _warmup():
     STATE["boot"] = "ready"
 
 
+def _boot_ok():
+    return BOOT_ERROR is None
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if BOOT_ERROR:
+        # Start anyway. A process that stays up and explains itself is more
+        # useful than one that dies and leaves only "Failed" in the dashboard.
+        log.error("starting in degraded mode: %s", BOOT_ERROR["error"])
+        yield
+        return
     tracker.init()
     STATE["boot"] = "starting"
     threading.Thread(target=_warmup, daemon=True).start()
@@ -235,13 +264,32 @@ templates = Jinja2Templates(directory="templates")
 
 
 # ------------------------------------------------------------------- routes
+BOOT_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<title>KRT AI - startup failed</title>
+<style>body{background:#0A0D14;color:#E8EAF0;font-family:ui-monospace,monospace;padding:28px;
+line-height:1.7}h1{font-size:17px;color:#FF4D5E;margin:0 0 4px}.b{color:#FFA033;letter-spacing:.26em;
+font-size:10px}pre{background:#12161F;border:1px solid #232A38;border-radius:3px;padding:12px;
+white-space:pre-wrap;word-break:break-word;font-size:11px;color:#8A93A6}
+.h{color:#FFA033;font-size:12px}</style></head><body>
+<div class="b">KRT AI</div><h1>The terminal could not start.</h1>
+<p class="h">%s</p><pre>%s</pre><pre>%s</pre>
+<p style="color:#8A93A6;font-size:11px">No market data is served while this is showing. Fix the
+import and redeploy; nothing here is a signal.</p></body></html>"""
+
+
 @app.get("/")
 def index(request: Request):
+    if BOOT_ERROR:
+        return HTMLResponse(
+            BOOT_HTML % (BOOT_ERROR["hint"], BOOT_ERROR["error"], BOOT_ERROR["trace"]),
+            status_code=503)
     return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/api/health")
 def health():
+    if BOOT_ERROR:
+        return JSONResponse({"ok": False, "boot_error": BOOT_ERROR}, status_code=503)
     return {
         "ok": True,
         "broker": client.connected,
@@ -313,6 +361,7 @@ def snapshot():
         "commander": snap["commander"], "risk": snap["risk"],
         "accumulation": snap.get("accumulation"),
         "golden": snap.get("golden"),
+        "breaks": snap.get("breaks"),
         "empty_reason": snap.get("empty_reason"),
         "scan_error": STATE["error"],
         "tokens_resolved": snap.get("tokens_resolved"),

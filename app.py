@@ -362,6 +362,7 @@ def snapshot():
         "accumulation": snap.get("accumulation"),
         "golden": snap.get("golden"),
         "breaks": snap.get("breaks"),
+        "gamma": snap.get("gamma"),
         "empty_reason": snap.get("empty_reason"),
         "scan_error": STATE["error"],
         "tokens_resolved": snap.get("tokens_resolved"),

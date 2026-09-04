@@ -120,6 +120,28 @@ def implied_vol(prem, spot, strike, expiry, kind):
     return round(v * 100, 2) if 0.01 < v < 4.9 else None
 
 
+def _norm_pdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def option_gamma(spot, strike, expiry, iv_pct, r=0.065):
+    """
+    Gamma is the same for a call and a put on the same strike, so no `kind`.
+
+    It is solved from the premium-implied volatility rather than read from the
+    feed, because the broker sends no greeks at all. That makes it arithmetic
+    on a quoted price - honest, but only as good as the IV behind it, which is
+    why a contract with no time value returns None instead of a large number.
+    """
+    t = years_to_expiry(expiry)
+    if not t or not iv_pct or not spot or not strike:
+        return None
+    vol = iv_pct / 100.0
+    d1 = (math.log(spot / strike) + (r + 0.5 * vol * vol) * t) / (vol * math.sqrt(t))
+    g = _norm_pdf(d1) / (spot * vol * math.sqrt(t))
+    return round(g, 6) if g > 0 else None
+
+
 def option_delta(spot, strike, expiry, iv_pct, kind, r=0.065):
     t = years_to_expiry(expiry)
     if not t or not iv_pct or not spot or not strike:

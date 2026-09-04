@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timedelta, date
 
 import accumulation
+import gamma as gamma_mod
 import quant
 import config
 import engine
@@ -1346,6 +1347,9 @@ def full_scan() -> dict:
 
     return {
         "breaks": breaks,
+        "gamma": (gamma_mod.scan(stocks, win) if not stale else
+                  {"available": False, "signals": [], "qualified": [], "carried": [],
+                   "note": "Feed is not live. Gamma moves are not scored on a stale book."}),
         "empty_reason": empty_reason,
         "universe_size": n_universe,
         "tokens_resolved": n_tokens,

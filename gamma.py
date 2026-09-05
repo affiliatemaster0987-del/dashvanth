@@ -46,13 +46,13 @@ _live = {}          # (sym, side) -> signal record
 _day = None
 
 WEIGHTS = {
-    "BREAKOUT":   25,
-    "VOLUME":     20,
-    "TREND":      15,
-    "OPT_VOLUME": 10,
-    "LIQUIDITY":  10,
-    "GREEKS":     15,
-    "MOMENTUM":    5,
+    "BREAKOUT":   25,     # quality of the level break / breakdown
+    "REL_VOLUME": 20,     # relative volume against the stock's own average
+    "VWAP":       15,     # price on the correct side of VWAP
+    "MOMENTUM":   10,     # trend / EMA stack agreeing
+    "OPT_VOLUME": 10,     # option turnover and open interest
+    "GREEKS":     15,     # delta fit and gamma
+    "SPREAD":      5,     # bid-ask cost
 }
 TOTAL = sum(WEIGHTS.values())
 
@@ -76,36 +76,76 @@ BEAR_LEVELS = [("pdl", "PREV DAY LOW"), ("pwl", "PREV WEEK LOW"),
                ("orl", "FIRST 15-MIN LOW")]
 
 
+def rel_volume_band(vr):
+    """Relative volume in words, so "strong" always means the same thing."""
+    if vr is None:
+        return None, "no live volume"
+    if vr < 1.0:
+        return "WEAK", f"{round(vr, 2)}x — below its own average"
+    if vr < 1.5:
+        return "NORMAL", f"{round(vr, 2)}x — normal participation"
+    if vr < 2.0:
+        return "GOOD", f"{round(vr, 2)}x average"
+    return "STRONG", f"{round(vr, 2)}x average"
+
+
 def underlying_case(st, side):
     """
     Does the stock itself justify looking at its chain at all?
 
-    Touching a level is not breaking it, and a break without volume is not a
-    move, so both are required before anything else runs.
+    Two things are MANDATORY and a candidate is dropped without them:
+
+      * VWAP on the right side. A call bought while price sits under VWAP is
+        fighting the session's own average; the same in reverse for a put.
+        This used to be scored rather than required, which let a bearish
+        signal through with price above VWAP.
+      * The first 5-minute level taken. That is the confirmation the move has
+        actually started, as opposed to price merely sitting near a level.
+
+    The 15-minute range and the day / week / month extremes are additive: they
+    strengthen a case that already exists, they do not create one.
     """
     ltp, vwap = st.get("ltp"), st.get("vwap")
     if not ltp:
         return None
     up = side == "CE"
-    levels = BULL_LEVELS if up else BEAR_LEVELS
 
-    broken = []
+    # --- mandatory 1: VWAP must agree with the direction
+    if not vwap:
+        return None
+    vwap_ok = (ltp > vwap) if up else (ltp < vwap)
+    if not vwap_ok:
+        return None
+
+    # --- mandatory 2: the first 5-minute level must be taken
+    k5 = "or5h" if up else "or5l"
+    lv5 = st.get(k5)
+    if not lv5 or not (ltp > lv5 if up else ltp < lv5):
+        return None
+
+    levels = BULL_LEVELS if up else BEAR_LEVELS
+    broken, extra = [], []
     for key, label in levels:
         lv = st.get(key)
         if lv and (ltp > lv if up else ltp < lv):
-            broken.append({"key": key, "name": label, "level": round(lv, 2)})
-    if not broken:
-        return None
+            entry = {"key": key, "name": label, "level": round(lv, 2)}
+            broken.append(entry)
+            if key not in (k5,):
+                extra.append(entry)
 
-    vol = st.get("vol_ratio")
-    vwap_ok = (ltp > vwap) if (vwap and up) else (ltp < vwap) if vwap else None
+    vr = st.get("vol_ratio")
+    vol_band, vol_note = rel_volume_band(vr)
     stack = (st.get("stack") or {}).get("label", "")
     trend_ok = ("UP" in stack) if up else ("DOWN" in stack)
 
     return {
-        "broken": broken, "levels_taken": len(broken),
-        "vol_ratio": vol, "vwap_ok": vwap_ok, "trend_ok": trend_ok,
-        "stack": stack, "ltp": round(ltp, 2), "vwap": vwap,
+        "broken": broken, "extra": extra, "levels_taken": len(broken),
+        "five_min": {"key": k5, "level": round(lv5, 2),
+                     "name": "FIRST 5-MIN HIGH" if up else "FIRST 5-MIN LOW"},
+        "vol_ratio": vr, "vol_band": vol_band, "vol_note": vol_note,
+        "vwap_ok": True, "vwap_side": "above" if up else "below",
+        "trend_ok": trend_ok, "stack": stack,
+        "ltp": round(ltp, 2), "vwap": round(vwap, 2),
     }
 
 
@@ -185,6 +225,14 @@ def pick_strike(sym, spot, side):
 
 # ---------------------------------------------------------------- score
 def score(case, opt):
+    """
+    Score the confirmations that actually exist.
+
+    A hard rule sits on top of the arithmetic: a move cannot be called STRONG
+    on average volume. Relative volume is the difference between a level being
+    taken and a level being taken by someone, so the band caps the grade no
+    matter how well everything else reads.
+    """
     comps, got, possible = [], 0.0, 0.0
 
     def add(k, ok, detail, pts=None, available=True):
@@ -199,41 +247,33 @@ def score(case, opt):
         comps.append({"k": k, "weight": w, "available": True, "ok": bool(ok),
                       "earned": round(earned, 1), "detail": detail})
 
-    n = case["levels_taken"]
-    add("BREAKOUT", n >= 1,
-        f"{n} level{'s' if n != 1 else ''} taken · "
-        + ", ".join(b["name"] for b in case["broken"]),
-        WEIGHTS["BREAKOUT"] if n >= 2 else 16 if n == 1 else 0)
+    # --- breakout quality: the 5-minute level is the entry ticket, the rest add
+    n_extra = len(case.get("extra") or [])
+    names = ", ".join(b["name"] for b in case["broken"])
+    add("BREAKOUT", n_extra >= 1,
+        f"{case['levels_taken']} level{'s' if case['levels_taken'] != 1 else ''} taken · {names}",
+        25 if n_extra >= 3 else 22 if n_extra == 2 else 19 if n_extra == 1 else 14)
 
-    vr = case.get("vol_ratio")
+    vr, band = case.get("vol_ratio"), case.get("vol_band")
     if vr is None:
-        add("VOLUME", False, "no live volume on this feed", available=False)
+        add("REL_VOLUME", False, "no live volume on this feed", available=False)
     else:
-        add("VOLUME", vr >= 2.0, f"{round(vr, 2)}x average",
-            20 if vr >= 2.5 else 14 if vr >= 1.8 else 7 if vr >= 1.3 else 0)
+        add("REL_VOLUME", band in ("GOOD", "STRONG"), f"{band} · {case.get('vol_note')}",
+            20 if band == "STRONG" else 15 if band == "GOOD" else
+            8 if band == "NORMAL" else 0)
 
-    if case.get("vwap_ok") is None:
-        add("TREND", False, "no VWAP on this row", available=False)
-    else:
-        both = case["vwap_ok"] and case["trend_ok"]
-        add("TREND", both,
-            f"{'above' if case['vwap_ok'] else 'below'} VWAP · {case.get('stack') or 'no stack'}",
-            15 if both else 8 if case["vwap_ok"] else 0)
+    add("VWAP", True, f"{case['vwap_side']} VWAP {case['vwap']}")
 
-    ov = opt.get("vol")
+    add("MOMENTUM", bool(case.get("trend_ok")),
+        case.get("stack") or "no EMA stack",
+        10 if case.get("trend_ok") else 4)
+
+    ov, turn = opt.get("vol"), opt.get("turnover") or 0
     if not ov:
         add("OPT_VOLUME", False, "no option volume quoted", available=False)
     else:
-        t = opt.get("turnover") or 0
-        add("OPT_VOLUME", t >= 0.5, f"{opt['vol']:,} traded · {t}x OI",
-            10 if t >= 0.5 else 6 if t >= 0.2 else 2)
-
-    sp = opt.get("spread_pct")
-    if sp is None:
-        add("LIQUIDITY", False, "no depth in the quote", available=False)
-    else:
-        add("LIQUIDITY", sp <= 1.5, f"spread {sp}% of premium",
-            10 if sp <= 1.5 else 6 if sp <= 3 else 0)
+        add("OPT_VOLUME", turn >= 0.5, f"{ov:,} traded · {turn}x OI",
+            10 if turn >= 0.5 else 6 if turn >= 0.2 else 2)
 
     d, g = opt.get("delta"), opt.get("gamma")
     if d is None or g is None:
@@ -244,21 +284,39 @@ def score(case, opt):
         add("GREEKS", fit >= 1.0, f"delta {d} · gamma {g}",
             15 if fit >= 1.0 else 9 if fit >= 0.6 else 3)
 
-    # Momentum here is price behaviour across scans, not order flow.
-    add("MOMENTUM", bool(case.get("trend_ok")),
-        "EMA stack agrees" if case.get("trend_ok") else "EMA stack does not agree",
-        5 if case.get("trend_ok") else 0)
+    sp = opt.get("spread_pct")
+    if sp is None:
+        add("SPREAD", False, "no depth in the quote", available=False)
+    else:
+        add("SPREAD", sp <= 1.5, f"{sp}% of premium",
+            5 if sp <= 1.5 else 3 if sp <= 3 else 0)
 
     raw = round(100 * got / possible) if possible else None
     thin = possible < 60
-    band = ("NO DATA" if raw is None else
-            "INSUFFICIENT DATA" if thin else
-            "STRONG GAMMA MOVE" if raw >= 85 else
-            "GAMMA TRIGGER" if raw >= 75 else
-            "GAMMA WATCH" if raw >= 65 else "IGNORE")
-    stage = 2 if (raw or 0) >= 85 else 1 if (raw or 0) >= 75 else 0
+
+    # --- the volume ceiling
+    capped_at, cap_note = None, None
+    final = raw
+    if raw is not None and vr is not None:
+        if vr < 1.0:
+            capped_at, cap_note = 74, ("Relative volume is under 1.0x — the level was taken on "
+                                       "less than the stock's own average trade. Held at WATCH.")
+        elif vr < 1.5:
+            capped_at, cap_note = 84, ("Relative volume is under 1.5x. A move on ordinary volume "
+                                       "is not a STRONG move, whatever the rest of the card says.")
+        if capped_at is not None and raw > capped_at:
+            final = capped_at
+
+    band_label = ("NO DATA" if final is None else
+                  "INSUFFICIENT DATA" if thin else
+                  "STRONG GAMMA MOVE" if final >= 85 else
+                  "GAMMA TRIGGER" if final >= 75 else
+                  "GAMMA WATCH" if final >= 65 else "IGNORE")
+    stage = 2 if (final or 0) >= 85 else 1 if (final or 0) >= 75 else 0
+
     return {
-        "score": raw, "band": band, "stage": stage, "stage_label": STAGES[stage],
+        "score": final, "raw_score": raw, "capped_at": capped_at, "cap_note": cap_note,
+        "band": band_label, "stage": stage, "stage_label": STAGES[stage],
         "components": comps, "measured": sum(1 for c in comps if c["available"]),
         "of": len(WEIGHTS), "possible": round(possible), "thin": thin,
         "coverage_note": (f"Only {round(possible)} of 100 points could be measured. Held below "
@@ -402,17 +460,54 @@ def scan(stocks, win, max_candidates=6):
     signals.sort(key=lambda s: -(s["score"] or 0))
     qualified = [s for s in signals if (s["score"] or 0) >= 75 and not s["thin"]]
 
+    # --- call of the day: the highest score is a candidate, not a winner
+    def day_call_checks(sig):
+        opt, live, case = sig.get("option") or {}, sig.get("live"), sig.get("case") or {}
+        out = []
+        state = (live or {}).get("state")
+        out.append({"k": "Signal still active", "ok": state in (None, "ACTIVE"),
+                    "note": f"state {state or 'new'}"})
+        sp = opt.get("spread_pct")
+        out.append({"k": "Spread acceptable", "ok": sp is not None and sp <= 3.0,
+                    "note": f"{sp}% of premium" if sp is not None else "spread unknown"})
+        turn = opt.get("turnover") or 0
+        out.append({"k": "Option liquidity good", "ok": turn >= 0.2 and bool(opt.get("oi")),
+                    "note": f"{turn}x OI turnover"})
+        # overextended: premium already through the first target
+        p = (live or {}).get("plan")
+        prem = (live or {}).get("prem", opt.get("prem"))
+        ext = bool(p and p.get("t1") and prem and prem >= p["t1"])
+        out.append({"k": "Not already extended past T1", "ok": not ext,
+                    "note": "premium is past T1" if ext else "still inside the plan"})
+        out.append({"k": "Momentum continuing", "ok": bool(case.get("trend_ok")),
+                    "note": case.get("stack") or "no EMA stack"})
+        return out
+
+    best, best_checks, rejected = None, None, []
+    for sig in qualified:
+        checks = day_call_checks(sig)
+        sig["day_call_checks"] = checks
+        if all(c["ok"] for c in checks):
+            best, best_checks = sig, checks
+            break
+        rejected.append({"sym": sig["sym"], "side": sig["side"], "score": sig["score"],
+                         "failed": [c["k"] for c in checks if not c["ok"]]})
+
     return {
         "available": True,
         "signals": signals,
         "qualified": qualified,
         "carried": live_only,
-        "best": qualified[0] if qualified else None,
+        "best": best,
+        "best_checks": best_checks,
+        "day_call_rejected": rejected,
         "skipped": skipped,
         "weights": WEIGHTS,
-        "note": (None if qualified else
-                 "NO QUALIFIED GAMMA MOVE. Nothing cleared a confirmed trigger, so nothing is "
-                 "being promoted. A day without a setup is a normal day."),
+        "note": (None if best else
+                 ("NO HIGH-QUALITY GAMMA SETUP. "
+                  + ("Signals scored, but none passed the call-of-the-day checks — see below."
+                     if qualified else
+                     "Nothing cleared a confirmed trigger. A day without a setup is a normal day."))),
         "method": ("Level break, then volume, then VWAP and trend, then momentum — only then is "
                    "the chain scanned. High gamma on its own never produces a signal."),
     }

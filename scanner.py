@@ -1321,9 +1321,14 @@ def full_scan() -> dict:
 
     empty_reason = None
     if not stocks and not indices:
+        ok_n = getattr(client, "candle_ok", None)
+        fail_n = getattr(client, "candle_failures", None)
         stage = (f"universe {n_universe} · tokens resolved {n_tokens} · "
                  f"symbols scanned {len(stocks)} · candles live {fresh_n}, "
-                 f"old {old_n}, missing {nodata_n}")
+                 f"old {old_n}, missing {nodata_n}"
+                 + (f" · candle calls ok {ok_n}, refused {fail_n}" if ok_n is not None else "")
+                 + (f" · daily window that worked: {client.candle_window}d"
+                    if getattr(client, "candle_window", None) else ""))
         if not ready or n_tokens == 0:
             empty_reason = (
                 "No symbol could be resolved to a broker token, so nothing was scanned. The "
@@ -1334,10 +1339,21 @@ def full_scan() -> dict:
                 f"All {n_tokens} symbols resolved, but every one failed to return candles. That "
                 f"is a broker or network problem, not a quiet market. [{stage}]")
         else:
-            empty_reason = (
-                f"{n_tokens} of {n_universe} symbols resolved to tokens, yet none produced a "
-                "usable snapshot. Each needs at least three daily candles; the history request "
-                f"is most likely being refused or rate-limited. [{stage}]")
+            ch = client.candle_health() if hasattr(client, "candle_health") else {}
+            err = (ch or {}).get("last_error") or {}
+            if err.get("message"):
+                empty_reason = (
+                    f"{n_tokens} of {n_universe} symbols resolved to tokens, but the history "
+                    f"request is being refused. The broker's own words: \"{err['message']}\""
+                    + (f" (code {err['errorcode']})" if err.get("errorcode") else "")
+                    + f", last seen {err.get('at', 'just now')}. "
+                    f"{ch.get('failed', 0)} candle calls have failed against "
+                    f"{ch.get('ok', 0)} that worked. [{stage}]")
+            else:
+                empty_reason = (
+                    f"{n_tokens} of {n_universe} symbols resolved to tokens, yet none produced a "
+                    "usable snapshot. Each needs at least three daily candles, and the history "
+                    f"call returned nothing without saying why. [{stage}]")
     elif stocks and not indices:
         empty_reason = (f"{len(stocks)} stocks scanned but no index did. The index tokens or "
                         "their exchange segment are not resolving.")
@@ -1353,6 +1369,7 @@ def full_scan() -> dict:
         "empty_reason": empty_reason,
         "universe_size": n_universe,
         "tokens_resolved": n_tokens,
+        "candle_health": client.candle_health() if hasattr(client, "candle_health") else None,
         "instruments_ready": ready,
         "read": engine.market_read(label, fear, breadth, vix, win, best),
         "top_ce_watch": top_ce_watch, "top_pe_watch": top_pe_watch,

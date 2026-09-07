@@ -366,6 +366,7 @@ def snapshot():
         "empty_reason": snap.get("empty_reason"),
         "scan_error": STATE["error"],
         "tokens_resolved": snap.get("tokens_resolved"),
+        "candle_health": snap.get("candle_health"),
         "instruments_ready": snap.get("instruments_ready"),
         "universe_size": snap.get("universe_size"),
         "top_ce": slim(snap["top_ce"]), "top_pe": slim(snap["top_pe"]),

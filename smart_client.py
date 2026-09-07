@@ -118,6 +118,32 @@ class SmartClient:
                 return row["token"]
         return None
 
+    # candle health, so a silent refusal can be named rather than guessed at
+    last_candle_error = None
+    candle_failures = 0
+    candle_ok = 0
+
+    def candle_health(self):
+        return {"ok": self.candle_ok, "failed": self.candle_failures,
+                "last_error": self.last_candle_error}
+
+    candle_window = None          # the daily range that actually worked
+
+    def _shorter_window(self, token, interval, days, exchange):
+        """Walk down the range until the broker serves one, or give up."""
+        if interval != "ONE_DAY" or days <= 45:
+            return []
+        for shorter in (200, 90, 45):
+            if shorter >= days:
+                continue
+            rows = self.candles(token, interval, shorter, exchange, _fallback=False)
+            if rows:
+                self.candle_window = shorter
+                log.warning("candles %s: %sd refused, %sd worked", token, days, shorter)
+                self._candle_cache[(token, interval, days)] = rows
+                return rows
+        return []
+
     def instruments_ready(self):
         """
         True once the scrip master is indexed. Without it token_for returns
@@ -196,8 +222,18 @@ class SmartClient:
             return None
         return round(float(sell) - float(buy), 2)
 
-    def candles(self, token, interval="ONE_DAY", days=40, exchange="NSE"):
-        """Historical OHLCV. Cached per trading day to stay inside limits."""
+    def candles(self, token, interval="ONE_DAY", days=40, exchange="NSE",
+                _fallback=True):
+        """
+        Historical OHLCV. Cached per trading day to stay inside limits.
+
+        A long daily range is worth asking for - EMA200 needs 200 closes - but
+        the broker will refuse a window it does not like, and a refusal here
+        empties the entire board: every symbol needs three daily candles before
+        it is scanned at all. So a long request that comes back empty is
+        retried with progressively shorter windows rather than being accepted
+        as "this stock has no history".
+        """
         today = date.today()
         if self._cache_day != today:
             self._candle_cache.clear()
@@ -219,15 +255,51 @@ class SmartClient:
         try:
             res = self.api.getCandleData(params)
             rows = (res or {}).get("data") or []
+
+            # Angel answers a refused request with HTTP 200 and status=false.
+            # Reading only `data` turned "access denied" and "session expired"
+            # into an empty list, so the board reported "no candles" and the
+            # actual reason - the one sentence that would have explained the
+            # whole outage - was thrown away.
+            if not rows:
+                msg = (res or {}).get("message") or ""
+                code = (res or {}).get("errorcode") or ""
+                ok = (res or {}).get("status")
+                if ok is False or code or (msg and msg.upper() not in ("SUCCESS", "")):
+                    self.last_candle_error = {
+                        "token": str(token), "interval": interval,
+                        "message": str(msg) or "the broker refused the request",
+                        "errorcode": str(code),
+                        "at": now_ist().strftime("%H:%M:%S"),
+                    }
+                    self.candle_failures += 1
+                    log.warning("candles %s refused: %s %s", token, code, msg)
+                    # A refusal is exactly when the shorter window is worth
+                    # trying: the usual cause is a range the broker will not
+                    # serve, not a stock without history.
+                    return self._shorter_window(token, interval, days, exchange) \
+                        if _fallback else []
+
             out = [
                 {"t": c[0], "o": c[1], "h": c[2], "l": c[3], "c": c[4], "v": c[5]}
                 for c in rows
             ]
+            if out:
+                self.candle_ok += 1
             # intraday is only cached for a minute, daily for the whole session
             if interval == "ONE_DAY":
                 self._candle_cache[key] = out
+
+            if not out and _fallback:
+                return self._shorter_window(token, interval, days, exchange)
             return out
         except Exception as exc:                       # noqa: BLE001
+            self.last_candle_error = {
+                "token": str(token), "interval": interval,
+                "message": f"{type(exc).__name__}: {exc}", "errorcode": "",
+                "at": now_ist().strftime("%H:%M:%S"),
+            }
+            self.candle_failures += 1
             log.warning("candles %s failed: %s", token, exc)
             return []
 

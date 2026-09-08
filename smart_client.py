@@ -44,6 +44,22 @@ class Throttle:
             self.last = time.time()
 
 
+AUTH_MARKERS = ("INVALID TOKEN", "TOKEN EXPIRE", "SESSION EXPIRE", "UNAUTHOR",
+                "INVALID SESSION", "AG8001", "AG8002")
+
+
+def _is_auth_error(msg, code=""):
+    """
+    An expired session and a bad date range look the same from the outside -
+    both come back as an empty candle list - but they need opposite responses.
+    A shorter window will never fix an expired token; it just sends the same
+    rejection three more times.
+    """
+    blob = f"{msg} {code}".upper()
+    return any(m in blob for m in AUTH_MARKERS)
+
+
+
 class SmartClient:
     def __init__(self):
         self.api = None
@@ -125,9 +141,33 @@ class SmartClient:
 
     def candle_health(self):
         return {"ok": self.candle_ok, "failed": self.candle_failures,
+                "auth_failures": self.auth_failures,
+                "connected": bool(self.connected),
+                "window": self.candle_window,
                 "last_error": self.last_candle_error}
 
     candle_window = None          # the daily range that actually worked
+    auth_failures = 0
+    _last_relogin = None
+
+    def _relogin(self):
+        """
+        Re-authenticate at most once a minute. Without the guard a dead session
+        turns every one of the scan's candle calls into its own login attempt,
+        which is how a broker starts refusing everything.
+        """
+        now = now_ist()
+        if self._last_relogin and (now - self._last_relogin).total_seconds() < 60:
+            return False
+        self._last_relogin = now
+        log.warning("session rejected - re-authenticating")
+        try:
+            self.login()
+        except Exception as exc:                       # noqa: BLE001
+            log.error("re-login failed: %s", exc)
+            return False
+        return bool(self.connected)
+
 
     def _shorter_window(self, token, interval, days, exchange):
         """Walk down the range until the broker serves one, or give up."""
@@ -223,7 +263,7 @@ class SmartClient:
         return round(float(sell) - float(buy), 2)
 
     def candles(self, token, interval="ONE_DAY", days=40, exchange="NSE",
-                _fallback=True):
+                _fallback=True, _relogin=True):
         """
         Historical OHLCV. Cached per trading day to stay inside limits.
 
@@ -250,6 +290,8 @@ class SmartClient:
             "interval": interval,
             "fromdate": from_dt.strftime("%Y-%m-%d %H:%M"),
             "todate": to_dt.strftime("%Y-%m-%d %H:%M"),
+            "auth_failures": self.auth_failures,
+            "connected": bool(self.connected),
         }
         self.throttle.wait()
         try:
@@ -274,9 +316,18 @@ class SmartClient:
                     }
                     self.candle_failures += 1
                     log.warning("candles %s refused: %s %s", token, code, msg)
-                    # A refusal is exactly when the shorter window is worth
-                    # trying: the usual cause is a range the broker will not
-                    # serve, not a stock without history.
+
+                    if _is_auth_error(msg, code):
+                        # The session is dead. Re-login once and try again;
+                        # walking the window down here would only repeat the
+                        # same rejection and multiply the load on a broker
+                        # that is already turning us away.
+                        self.auth_failures += 1
+                        if _relogin and self._relogin():
+                            return self.candles(token, interval, days, exchange,
+                                                _fallback=_fallback, _relogin=False)
+                        return []
+
                     return self._shorter_window(token, interval, days, exchange) \
                         if _fallback else []
 
@@ -301,6 +352,9 @@ class SmartClient:
             }
             self.candle_failures += 1
             log.warning("candles %s failed: %s", token, exc)
+            if _is_auth_error(str(exc)) and _relogin and self._relogin():
+                return self.candles(token, interval, days, exchange,
+                                    _fallback=_fallback, _relogin=False)
             return []
 
     # -------------------------------------------------------- option chain

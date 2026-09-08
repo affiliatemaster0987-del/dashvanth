@@ -1341,7 +1341,18 @@ def full_scan() -> dict:
         else:
             ch = client.candle_health() if hasattr(client, "candle_health") else {}
             err = (ch or {}).get("last_error") or {}
-            if err.get("message"):
+            if err.get("message") and ch.get("auth_failures"):
+                # An expired session is not a market condition and not a range
+                # problem. It has its own fix, so it gets its own sentence.
+                empty_reason = (
+                    "The broker session has expired — the history request is being answered with "
+                    f"\"{err['message']}\""
+                    + (f" (code {err['errorcode']})" if err.get("errorcode") else "")
+                    + f", last at {err.get('at', 'just now')}. The terminal re-authenticates by "
+                      "itself and usually recovers within a scan or two. If it keeps repeating, "
+                      "the API key or TOTP secret in the environment is what to check — not the "
+                      f"market. [{stage}]")
+            elif err.get("message"):
                 empty_reason = (
                     f"{n_tokens} of {n_universe} symbols resolved to tokens, but the history "
                     f"request is being refused. The broker's own words: \"{err['message']}\""
